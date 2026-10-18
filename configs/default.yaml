@@ -1,0 +1,17 @@
+data:
+  root: D:/projects/driver-attention/data/processed
+  labels_csv: D:/projects/driver-attention/data/processed/labels.csv
+  input_size: [1120, 224]
+  batch_size: 8
+  num_workers: 4
+
+checkpoint:
+  save_dir: D:/projects/driver-attention/checkpoints
+  save_best: true
+  monitor: val_kld
+  mode: min
+
+logging:
+  use_wandb: true
+  project: driver-attention
+  save_dir: D:/projects/driver-attention/results/logs
