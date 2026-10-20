@@ -21,14 +21,29 @@ JOBS=${2:-$(nproc)}
 # ones are thrown away.
 unpack() {
     rec=$1
+    csv_frames=$(awk 'END { print NR - 1 }' "$rec/sim_gaze_df.csv")
+    if [[ ! $csv_frames =~ ^[1-9][0-9]*$ ]]; then
+        echo "FAILED $rec/sim_gaze_df.csv: expected a header and at least one frame row" >&2
+        return 1
+    fi
 
     for pair in rgb.mp4:rgb saliency.mp4:saliency dt.mp4:DT; do
         src=$rec/${pair%%:*} out=$rec/${pair##*:}
-        [[ -d $out || ! -f $src ]] && continue
+        [[ ! -f $src ]] && continue
+        if [[ -d $out ]]; then
+            existing_frames=$(find "$out" -maxdepth 1 -type f -name '*.jpg' | wc -l)
+            if (( existing_frames == csv_frames )); then
+                continue
+            fi
+        fi
         rm -rf "$out.partial" && mkdir -p "$out.partial"
         # Frame ids in sim_gaze_df.csv are 1-based, so start numbering at 1.
         ffmpeg -nostdin -loglevel error -y -i "$src" \
-            -q:v 1 -qmin 1 -start_number 1 "$out.partial/%06d.jpg" </dev/null \
+            -frames:v "$csv_frames" -q:v 1 -qmin 1 -start_number 1 \
+            "$out.partial/%06d.jpg" </dev/null \
+            && extracted_frames=$(find "$out.partial" -maxdepth 1 -type f -name '*.jpg' | wc -l) \
+            && (( extracted_frames == csv_frames )) \
+            && rm -rf "$out" \
             && mv "$out.partial" "$out" \
             || { echo "FAILED $src" >&2; rm -rf "$out.partial"; }
     done
