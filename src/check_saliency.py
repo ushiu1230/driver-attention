@@ -1,4 +1,5 @@
 
+import random
 from pathlib import Path
 
 import numpy as np
@@ -7,8 +8,8 @@ import cv2
 from PIL import Image
 
 # Change these paths to your dataset directories
-RGB_DIR = Path("drivergaze360_subset/dataset/train/C011/001/001/rgb")
-SALIENCY_DIR = Path("drivergaze360_subset/dataset/C011/001/001/saliency")
+RGB_DIR = Path(r"drivergaze360_subset\dataset\train\C006\007\004\rgb")
+SALIENCY_DIR = Path(r"drivergaze360_subset\dataset\train\C006\007\004\saliency")
 
 def check_frame(frame_id):
     filename = f"{frame_id:06d}.jpg"
@@ -71,5 +72,10 @@ def check_frame(frame_id):
     plt.show()
 
 
-for frame_id in [130, 500, 1000]:
+frame_ids = sorted(int(path.stem) for path in RGB_DIR.glob("*.jpg"))
+
+if not frame_ids:
+    raise FileNotFoundError(f"No RGB frames found in {RGB_DIR}")
+
+for frame_id in random.sample(frame_ids, k=len(frame_ids)):
     check_frame(frame_id)
