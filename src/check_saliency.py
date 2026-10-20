@@ -7,8 +7,8 @@ import cv2
 from PIL import Image
 
 # Change these paths to your dataset directories
-RGB_DIR = Path("dataset/C011/001/001/rgb")
-SALIENCY_DIR = Path("dataset/C011/001/001/saliency")
+RGB_DIR = Path("drivergaze360_subset/dataset/train/C011/001/001/rgb")
+SALIENCY_DIR = Path("drivergaze360_subset/dataset/C011/001/001/saliency")
 
 def check_frame(frame_id):
     filename = f"{frame_id:06d}.jpg"

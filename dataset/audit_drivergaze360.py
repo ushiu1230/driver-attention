@@ -10,6 +10,7 @@ Expected extracted layout (per recording):
 Usage:
   python audit_drivergaze360.py "/path/to/DriverGaze360"
   python audit_drivergaze360.py "/path/to/DriverGaze360" --full-image-verify
+  python audit_drivergaze360.py D:\Master\CS2203_ComputerVision\04_Projects\driver-attention\drivergaze360_subset --full-image-verify
 
 Requires: pandas, Pillow
   pip install pandas pillow

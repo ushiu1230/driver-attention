@@ -7,7 +7,7 @@ from huggingface_hub import HfApi, snapshot_download
 # Configuration
 REPO_ID = "dfki-av/drivergaze360"
 REPO_TYPE = "dataset"
-SAVE_DIR = "./04_Projects/driver-attention/drivergaze360_20pct"
+SAVE_DIR = "drivergaze360_subset"
 FRACTION = 0.20
 SEED = 42
 
