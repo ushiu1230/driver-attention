@@ -90,6 +90,7 @@ class DG360LiteDataset(Dataset):
                 ]
                 idx = [f"{int(i):06d}" for i in sorted(meta.Frame)]
 
+
                 assert rgb == sal, f"rgb/saliency khác tên file: {p}"
                 assert rgb == idx, f"tên file khác cột Frame trong CSV: {p}"
 

@@ -1,5 +1,5 @@
 # =====================================================
-# DATA - KHONG BAO GIO PUSH LEN GIT
+# DATA
 # =====================================================
 data/
 drivergaze360_subset/
@@ -73,7 +73,7 @@ Thumbs.db
 desktop.ini
 
 # =====================================================
-# REPORT (tuy chon - neu muon giu rieng)
+# REPORT
 # =====================================================
 report/thesis.pdf
 report/slides.pdf
