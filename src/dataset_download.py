@@ -1,88 +1,85 @@
+
 import math
+import random
+from collections import defaultdict
 from huggingface_hub import HfApi, snapshot_download
 
-# 1. Configure parameters
-repo_id = "dfki-av/drivergaze360"
-repo_type = "dataset"
-save_dir = "./04_Projects/driver-attention/drivergaze360_subset"
+# Configuration
+REPO_ID = "dfki-av/drivergaze360"
+REPO_TYPE = "dataset"
+SAVE_DIR = "./04_Projects/driver-attention/drivergaze360_20pct"
+FRACTION = 0.20
+SEED = 42
 
-# 2. Scan the file list on Hugging Face
+KEEP_FILES = {"rgb.mp4", "saliency.mp4", "sim_gaze_df.csv"}
+
 api = HfApi()
-all_files = api.list_repo_files(repo_id=repo_id, repo_type=repo_type)
 
-# Analyze the folder structure from the file list
-# Format: dataset/train/C001/001/001-1/rgb.mp4
-train_participants = set()
-val_participants = set()
-test_participants = set()
-
-recording_map = {}
-
-for file_path in all_files:
-    parts = file_path.split('/')
-    if len(parts) >= 5 and parts[0] == "dataset":
-        split_type = parts[1]  # train, val, or test
-        driver_id = parts[2]   # C001, C002, ...
-        recording_id = parts[3]  # 001, 002, ...
-        sub_rec = parts[4]  # 001-1, ...
-
-        rec_path = f"{split_type}/{driver_id}/{recording_id}/{sub_rec}"
-
-        if split_type == "train":
-            train_participants.add(driver_id)
-        elif split_type == "val":
-            val_participants.add(driver_id)
-        elif split_type == "test":
-            test_participants.add(driver_id)
-
-        if driver_id not in recording_map:
-            recording_map[driver_id] = []
-        if rec_path not in recording_map[driver_id]:
-            recording_map[driver_id].append(rec_path)
-
-# Sort the driver list
-train_list = sorted(list(train_participants))
-val_list = sorted(list(val_participants))
-test_list = sorted(list(test_participants))
-
-# Step 1: Select 9 drivers according to the Balanced plan (6 Train, 2 Val, 1 Test)
-selected_train = train_list[:6]
-
-# Ensure there are no duplicate drivers across datasets
-selected_val = [d for d in val_list if d not in selected_train][:2]
-# If test_list is empty, we can fall back to selecting from other unused splits
-selected_test = [d for d in test_list if d not in selected_train and d not in selected_val][:1]
-if not selected_test:
-    # Fallback: select any driver not already assigned to Train or Val
-    all_drivers = sorted(list(recording_map.keys()))
-    potential_test = [d for d in all_drivers if d not in selected_train and d not in selected_val]
-    if potential_test:
-        selected_test = [potential_test[0]]
-
-print(f"Drivers selected for Train (6): {selected_train}")
-print(f"Drivers selected for Val (2): {selected_val}")
-print(f"Drivers selected for Test (1): {selected_test}")
-
-# Step 2 & 4: Only keep exactly 1 representative recording for each driver and only keep rgb.mp4 + saliency.mp4
-allow_patterns = []
-
-all_selected_drivers = selected_train + selected_val + selected_test
-for driver in all_selected_drivers:
-    recs = sorted(recording_map.get(driver, []))
-    if recs:
-        # Select the first recording as the representative
-        chosen_rec = recs[0]
-        print(f"-> Driver {driver} selected representative recording: {chosen_rec}")
-        allow_patterns.append(f"dataset/{chosen_rec}/rgb.mp4")
-        allow_patterns.append(f"dataset/{chosen_rec}/saliency.mp4")
-        allow_patterns.append(f"dataset/{chosen_rec}/sim_gaze_df.csv")
-
-# 5. Download the exact data according to the optimal configuration
-print("\nDownloading the optimal subset from Hugging Face...")
-snapshot_download(
-    repo_id=repo_id,
-    repo_type=repo_type,
-    allow_patterns=allow_patterns,
-    local_dir=save_dir
+print("Scanning dataset file list...")
+all_files = api.list_repo_files(
+    repo_id=REPO_ID,
+    repo_type=REPO_TYPE,
 )
-print("Subset download completed!")
+
+# Group available files by recording and original split
+recordings = defaultdict(dict)
+
+for path in all_files:
+    parts = path.split("/")
+
+    # Expected structure:
+    # dataset/train/C001/001/001-1/rgb.mp4
+    if (
+        len(parts) >= 6
+        and parts[0] == "dataset"
+        and parts[-1] in KEEP_FILES
+    ):
+        split = parts[1]
+        recording_dir = "/".join(parts[:-1])
+        recordings[(split, recording_dir)][parts[-1]] = path
+
+# Keep only recordings containing all three requested files
+eligible = defaultdict(list)
+
+for (split, recording_dir), files in recordings.items():
+    if KEEP_FILES.issubset(files.keys()):
+        eligible[split].append((recording_dir, files))
+
+# Select 20% independently within each original split
+rng = random.Random(SEED)
+selected_files = []
+
+for split in sorted(eligible):
+    candidates = sorted(eligible[split], key=lambda x: x[0])
+
+    if not candidates:
+        continue
+
+    n = max(1, math.ceil(len(candidates) * FRACTION))
+    n = min(n, len(candidates))
+
+    chosen = sorted(rng.sample(candidates, n), key=lambda x: x[0])
+
+    print(f"{split}: {n}/{len(candidates)} recordings selected")
+
+    for recording_dir, files in chosen:
+        print(f"  Selected: {recording_dir}")
+        selected_files.extend(files[name] for name in KEEP_FILES)
+
+if not selected_files:
+    raise RuntimeError(
+        "No eligible recordings found. Check the repository structure "
+        "and whether you have accepted the dataset access terms."
+    )
+
+print(f"\nTotal files to download: {len(selected_files)}")
+print(f"Saving to: {SAVE_DIR}")
+
+snapshot_download(
+    repo_id=REPO_ID,
+    repo_type=REPO_TYPE,
+    allow_patterns=selected_files,
+    local_dir=SAVE_DIR,
+)
+
+print("Download completed.")
