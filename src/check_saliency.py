@@ -1,81 +1,188 @@
-
+import argparse
 import random
+import sys
 from pathlib import Path
 
-import numpy as np
-import matplotlib.pyplot as plt
 import cv2
+import matplotlib.pyplot as plt
+import numpy as np
 from PIL import Image
 
-# Change these paths to your dataset directories
-RGB_DIR = Path(r"drivergaze360_subset\dataset\train\C006\007\004\rgb")
-SALIENCY_DIR = Path(r"drivergaze360_subset\dataset\train\C006\007\004\saliency")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-def check_frame(frame_id):
-    filename = f"{frame_id:06d}.jpg"
-    rgb_path = RGB_DIR / filename
-    sal_path = SALIENCY_DIR / filename
+from dataset.dataset import resize_with_pad
 
-    if not rgb_path.exists() or not sal_path.exists():
-        print(f"Missing frame: {filename}")
-        return
 
-    # Load corresponding frames
-    rgb = np.array(Image.open(rgb_path).convert("RGB"))
-    sal = np.array(Image.open(sal_path))
+DEFAULT_ROOT = PROJECT_ROOT / "dataset" / "drivergaze360_subset" / "dataset" / "train"
+PREVIEW_SIZE = (224, 1120)  # (H, W), matching DG360LiteDataset's fit-and-pad transform.
+RECORDING_COUNT = 3
+SAMPLE_COUNT = 4
 
-    print(f"Frame: {filename}")
-    print(f"RGB shape: {rgb.shape}")
-    print(f"Saliency shape: {sal.shape}")
-    print(f"Saliency range: {sal.min()} to {sal.max()}")
 
-    # Convert saliency to grayscale for visualization
-    if sal.ndim == 3:
-        sal_gray = cv2.cvtColor(sal, cv2.COLOR_RGB2GRAY)
-    else:
-        sal_gray = sal
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Preview sampled RGB/saliency pairs across recordings."
+    )
+    parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
+    parser.add_argument(
+        "--recordings",
+        type=int,
+        default=RECORDING_COUNT,
+        help="Random recordings to include in the contact sheet.",
+    )
+    parser.add_argument(
+        "--samples-per-recording",
+        type=int,
+        default=SAMPLE_COUNT,
+        help="Random frames to sample from each recording, spread over its duration.",
+    )
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--output",
+        type=Path,
+        help="Save the contact sheet to this path instead of opening a window.",
+    )
+    return parser.parse_args()
 
-    # Resize only for visualization if dimensions differ
-    if sal_gray.shape != rgb.shape[:2]:
-        sal_gray = cv2.resize(
-            sal_gray,
-            (rgb.shape[1], rgb.shape[0]),
-            interpolation=cv2.INTER_LINEAR,
+
+def image_files(folder):
+    return {
+        path.stem: path
+        for path in folder.iterdir()
+        if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg"}
+    }
+
+
+def find_recordings(root):
+    if not root.is_dir():
+        raise FileNotFoundError(f"Dataset root does not exist: {root}")
+
+    recordings = []
+    for csv_path in root.rglob("sim_gaze_df.csv"):
+        recording = csv_path.parent
+        if (recording / "rgb").is_dir() and (recording / "saliency").is_dir():
+            recordings.append(recording)
+    recordings.sort()
+    if not recordings:
+        raise FileNotFoundError(
+            f"No recordings containing rgb/, saliency/, and sim_gaze_df.csv found under {root}"
+        )
+    return recordings
+
+
+def sample_frame_ids(rgb_files, saliency_files, count, rng, recording):
+    rgb_ids = set(rgb_files)
+    saliency_ids = set(saliency_files)
+    if rgb_ids != saliency_ids:
+        missing_saliency = sorted(rgb_ids - saliency_ids)
+        missing_rgb = sorted(saliency_ids - rgb_ids)
+        raise ValueError(
+            f"RGB/saliency filenames differ in {recording}: "
+            f"missing saliency={missing_saliency[:5]}, missing RGB={missing_rgb[:5]}"
+        )
+    frame_ids = sorted(rgb_ids, key=lambda frame_id: int(frame_id))
+    if not frame_ids:
+        raise FileNotFoundError(f"No JPG frames found in {recording / 'rgb'}")
+
+    # Pick randomly within evenly spaced temporal bins to cover scene changes.
+    bins = np.array_split(np.asarray(frame_ids, dtype=object), min(count, len(frame_ids)))
+    return [str(rng.choice(frame_bin.tolist())) for frame_bin in bins]
+
+
+def load_pair(rgb_path, saliency_path):
+    with Image.open(rgb_path) as image:
+        rgb = image.convert("RGB")
+    with Image.open(saliency_path) as image:
+        saliency = image.convert("L")
+
+    if rgb.size != saliency.size:
+        raise ValueError(
+            "RGB/saliency source dimensions differ; refusing to hide a possible "
+            f"alignment issue:\n  RGB: {rgb_path} ({rgb.size})\n"
+            f"  Saliency: {saliency_path} ({saliency.size})"
         )
 
-    # Normalize for visualization, not for training
-    sal_float = sal_gray.astype(np.float32)
-    sal_norm = cv2.normalize(
-        sal_float, None, 0, 255, cv2.NORM_MINMAX
-    ).astype(np.uint8)
-
-    heatmap = cv2.applyColorMap(sal_norm, cv2.COLORMAP_JET)
-    heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
-
+    source_range = (int(np.asarray(saliency).min()), int(np.asarray(saliency).max()))
+    rgb = np.asarray(resize_with_pad(rgb, PREVIEW_SIZE))
+    saliency = np.asarray(resize_with_pad(saliency, PREVIEW_SIZE))
+    saliency_visual = np.empty_like(saliency)
+    cv2.normalize(
+        saliency,
+        saliency_visual,
+        alpha=0,
+        beta=255,
+        norm_type=cv2.NORM_MINMAX,
+    )
+    heatmap = cv2.cvtColor(
+        cv2.applyColorMap(saliency_visual, cv2.COLORMAP_JET),
+        cv2.COLOR_BGR2RGB,
+    )
     overlay = cv2.addWeighted(rgb, 0.6, heatmap, 0.4, 0)
-
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-
-    axes[0].imshow(rgb)
-    axes[0].set_title("RGB frame")
-
-    axes[1].imshow(sal_norm, cmap="hot")
-    axes[1].set_title("Saliency map")
-
-    axes[2].imshow(overlay)
-    axes[2].set_title("RGB + saliency overlay")
-
-    for ax in axes:
-        ax.axis("off")
-
-    plt.tight_layout()
-    plt.show()
+    return rgb, saliency_visual, overlay, source_range
 
 
-frame_ids = sorted(int(path.stem) for path in RGB_DIR.glob("*.jpg"))
+def main():
+    args = parse_args()
+    if args.recordings < 1:
+        raise ValueError("--recordings must be at least 1")
+    if args.samples_per_recording < 1:
+        raise ValueError("--samples-per-recording must be at least 1")
 
-if not frame_ids:
-    raise FileNotFoundError(f"No RGB frames found in {RGB_DIR}")
+    recordings = find_recordings(args.root)
+    rng = random.Random(args.seed)
+    recordings = rng.sample(recordings, k=min(args.recordings, len(recordings)))
+    previews = []
 
-for frame_id in random.sample(frame_ids, k=len(frame_ids)):
-    check_frame(frame_id)
+    for recording in recordings:
+        rgb_files = image_files(recording / "rgb")
+        saliency_files = image_files(recording / "saliency")
+        frame_ids = sample_frame_ids(
+            rgb_files, saliency_files, args.samples_per_recording, rng, recording
+        )
+        print(f"{recording.relative_to(args.root)}: sampled frames {', '.join(frame_ids)}")
+        for frame_id in frame_ids:
+            rgb, saliency, overlay, saliency_range = load_pair(
+                rgb_files[frame_id], saliency_files[frame_id]
+            )
+            previews.append((
+                recording.relative_to(args.root),
+                frame_id,
+                rgb,
+                saliency,
+                overlay,
+                saliency_range,
+            ))
+
+    fig, axes = plt.subplots(
+        len(previews), 3, figsize=(15, max(4, 3.2 * len(previews))), squeeze=False
+    )
+    for row, (
+        recording,
+        frame_id,
+        rgb,
+        saliency,
+        overlay,
+        saliency_range,
+    ) in enumerate(previews):
+        axes[row, 0].imshow(rgb)
+        axes[row, 0].set_title(f"{recording} | frame {frame_id} | RGB")
+        axes[row, 1].imshow(saliency, cmap="hot", vmin=0, vmax=255)
+        axes[row, 1].set_title(f"Saliency (source range {saliency_range})")
+        axes[row, 2].imshow(overlay)
+        axes[row, 2].set_title("Overlay")
+        for axis in axes[row]:
+            axis.axis("off")
+
+    fig.tight_layout()
+    if args.output:
+        fig.savefig(args.output, dpi=120, bbox_inches="tight")
+        print(f"Saved contact sheet to {args.output}")
+        plt.close(fig)
+    else:
+        plt.show()
+
+
+if __name__ == "__main__":
+    main()
