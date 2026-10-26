@@ -1,12 +1,18 @@
-from dataset.dataset import DG360LiteDataset
+from torchvision.models import mobilenet_v3_large, MobileNet_V3_Large_Weights
+import torch
+model = mobilenet_v3_large(weights=MobileNet_V3_Large_Weights.DEFAULT)
 
-train_ds = DG360LiteDataset(
-    root="drivergaze360_subset/dataset/train",
-    T=16,                  # frames per clip
-    frame_stride=1,        # spacing between frames in a clip
-    clip_step=8,           # frames between successive clip starts
-    img_size=(224, 1120),  # (height, width)
-    skip_first=30,
-)
+for i, layer in enumerate(model.features):
+    print(i, layer)
 
-print(len(train_ds))
+x = torch.randn(1, 3, 224, 1120)
+stage_indices = (3, 6, 12, 16)
+
+model.eval()
+
+with torch.no_grad():
+    for i, layer in enumerate(model.features):
+        x = layer(x)
+
+        if i in stage_indices:
+            print(i, x.shape)

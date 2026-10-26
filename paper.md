@@ -15,11 +15,11 @@ model based on a MobileNetV3-Large image encoder and Temporal Shift Modules
 (TSM) is proposed. The project-specific data loader validates frame IDs
 against the extracted RGB and saliency files and preserves the panoramas'
 aspect ratio when fitting them to a fixed-size model input. The current
-repository contains the data-loading pipeline and TSM components, but not a
-complete model or training and evaluation pipeline. Consequently, this report
-does not claim quantitative results or comparative improvements. It specifies
-the task, preprocessing, proposed experiments, and evaluation needed to test
-whether temporal modeling improves saliency prediction.
+repository implements the end-to-end model forward pass, but a complete
+training and evaluation pipeline has not yet been validated. Consequently,
+this report does not claim quantitative results or comparative improvements.
+It specifies the task, preprocessing, proposed experiments, and evaluation
+needed to test whether temporal modeling improves saliency prediction.
 
 **Keywords:** driver attention, visual saliency, temporal modeling, Temporal
 Shift Module, MobileNetV3, DriverGaze360
@@ -142,12 +142,15 @@ or learn attention weights over frames. A lightweight feature-pyramid-style
 decoder and a sigmoid output are candidate design choices for producing a
 dense map at the target resolution.
 
-These components describe the **proposed architecture**, not a completed or
-validated end-to-end model. The current model file contains TSM insertion and
-temporal-pooling components, but the repository does not yet implement the
-complete backbone/decoder forward pass or a functioning training loop. The
-architecture and aggregation choice must be fixed and documented before
-reporting final experiments.
+The repository now implements an end-to-end `DriverGazeNet` forward pass with
+MobileNetV3-Large, optional TSM, temporal feature pooling, and a feature-pyramid
+saliency decoder. It returns full-resolution saliency logits; training should
+use a logits-compatible loss and apply sigmoid only for probability-based
+visualization or evaluation. This implementation has not yet been validated
+through a complete training and evaluation pipeline, so it does not establish
+that the architecture improves prediction performance. The aggregation mode,
+training setup, and evaluation protocol must be fixed and documented before
+reporting experimental results.
 
 ## 5. Experimental methodology
 
