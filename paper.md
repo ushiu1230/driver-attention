@@ -142,15 +142,15 @@ or learn attention weights over frames. A lightweight feature-pyramid-style
 decoder and a sigmoid output are candidate design choices for producing a
 dense map at the target resolution.
 
-The repository now implements an end-to-end `DriverGazeNet` forward pass with
+The repository implements an end-to-end `DriverGazeNet` forward pass with
 MobileNetV3-Large, optional TSM, temporal feature pooling, and a feature-pyramid
-saliency decoder. It returns full-resolution saliency logits; training should
-use a logits-compatible loss and apply sigmoid only for probability-based
-visualization or evaluation. This implementation has not yet been validated
-through a complete training and evaluation pipeline, so it does not establish
-that the architecture improves prediction performance. The aggregation mode,
-training setup, and evaluation protocol must be fixed and documented before
-reporting experimental results.
+saliency decoder. By default it returns full-resolution saliency logits. The
+`SingleFrameSaliencyNet` ablation uses only the last input frame, disables TSM,
+and applies sigmoid in the decoder to return values in \([0,1]\). Its training
+loss must consume probabilities and must not apply sigmoid a second time.
+Neither model has been validated through a complete training and evaluation
+pipeline, so the implementation does not establish that either architecture
+improves prediction performance.
 
 ## 5. Experimental methodology
 
@@ -170,7 +170,8 @@ using the same data partitions, preprocessing, input resolution, and
 evaluation protocol:
 
 1. A spatial prior-map baseline, such as the training-set mean saliency map.
-2. A single-frame image model using only \(I_t\).
+2. `SingleFrameSaliencyNet`: a single-frame MobileNetV3 model using only
+   \(I_t\), with no TSM and sigmoid-activated saliency output.
 3. A 16-frame model with temporal feature aggregation but without TSM.
 4. The proposed 16-frame model with TSM.
 

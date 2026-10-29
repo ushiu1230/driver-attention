@@ -3,12 +3,15 @@ import torch.nn.functional as F
 
 
 class SaliencyDecoder(nn.Module):
-    def __init__(self, in_channels=(24, 40, 112, 960), width=128):
+    def __init__(
+        self, in_channels=(24, 40, 112, 960), width=128, apply_sigmoid=False
+    ):
         super().__init__()
         if not in_channels or any(channels < 1 for channels in in_channels):
             raise ValueError("in_channels must contain positive channel counts")
         if width < 1:
             raise ValueError("width must be positive")
+        self.apply_sigmoid = apply_sigmoid
 
         self.lateral = nn.ModuleList([
             nn.Sequential(
@@ -32,7 +35,6 @@ class SaliencyDecoder(nn.Module):
             for _ in range(len(in_channels) - 1)
         ])
 
-        # Produces saliency logits; apply sigmoid for visualization/inference.
         self.head = nn.Conv2d(width, 1, kernel_size=1)
 
     def forward(self, features, output_size):
@@ -57,4 +59,7 @@ class SaliencyDecoder(nn.Module):
         x = F.interpolate(
             x, size=output_size, mode="bilinear", align_corners=False
         )
-        return self.head(x)  # [B, 1, H, W] logits
+        x = self.head(x)
+        if self.apply_sigmoid:
+            x = x.sigmoid()
+        return x

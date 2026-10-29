@@ -1,0 +1,398 @@
+\documentclass[10pt,twocolumn,letterpaper]{article}
+
+\usepackage[review]{cvpr}
+\usepackage{times}
+\usepackage{epsfig}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage[pagebackref,breaklinks,colorlinks]{hyperref}
+\usepackage[capitalize]{cleveref}
+
+\def\cvprPaperID{0000}
+\def\confName{CVPR}
+\def\confYear{2026}
+
+\begin{document}
+
+\title{Lightweight Temporal Modeling for Driver Visual Saliency Prediction}
+
+\author{
+Author Name\\
+Department and Institution\\
+{\tt\small author@example.com}
+}
+\maketitle
+
+\begin{abstract}
+This work studies current-frame visual-saliency prediction for panoramic
+driving videos using the DriverGaze360 dataset. Given a short sequence of RGB
+frames ending at time \(t\), the task is to predict the dataset-provided
+saliency map associated with frame \(t\). We implement a lightweight model
+based on a MobileNetV3-Large encoder, Temporal Shift Modules (TSM), temporal
+feature aggregation, and a multi-scale decoder. A single-frame model is
+defined as a baseline for evaluating whether temporal information contributes
+to prediction quality. The project also documents frame alignment checks and
+aspect-preserving preprocessing for the panoramic images. At the time of
+writing, a complete training and evaluation pipeline has not been validated;
+therefore, we report no quantitative results and make no claim of
+improvement. The paper specifies the task, implementation, and controlled
+experiments required to test the temporal-modeling hypothesis.
+\end{abstract}
+
+\section{Project Team and Completion}
+\label{sec:team}
+
+The member names, task assignments, and completion estimates were not
+provided in the project materials available for this draft. The table below
+is a reporting template and must be completed by the team; no individual
+contribution or completion percentage is inferred here.
+
+\begin{table}[t]
+    \centering
+    \caption{Team members and self-reported task completion.}
+    \label{tab:team}
+    \small
+    \begin{tabularx}{\linewidth}{l X c}
+        \toprule
+        Member & Assigned work / evidence & Completion \\
+        \midrule
+        To be completed & To be completed & -- \\
+        To be completed & To be completed & -- \\
+        To be completed & To be completed & -- \\
+        \bottomrule
+    \end{tabularx}
+\end{table}
+
+\section{Introduction}
+\label{sec:intro}
+
+Visual attention is relevant to understanding driver behavior and to
+developing driver-assistance systems. A visual-saliency map represents a
+spatial distribution of attention over an image and offers one way to analyze
+which regions of a driving scene attract gaze. In panoramic driving scenes,
+the model must process a wide field of view while preserving spatial detail.
+Studying this task is useful for evaluating whether models can represent
+driver-attention patterns across a panoramic scene. A saliency prediction
+alone, however, does not establish why a driver looked at a region or whether
+the behavior was safe.
+
+This work considers a focused prediction task on DriverGaze360
+\cite{govil2026drivergaze360}. Given a short RGB clip ending at frame \(t\),
+the model predicts the dataset-provided saliency map for that same frame.
+This is current-frame prediction, not future gaze forecasting. Our research
+question is:
+\begin{quote}
+Does lightweight temporal feature modeling improve current-frame saliency
+prediction compared with a single-frame image model?
+\end{quote}
+
+We implement a MobileNetV3-Large encoder \cite{howard2019mobilenetv3} and use
+TSM \cite{lin2019tsm} to exchange a fraction of feature channels across
+neighboring frames. A multi-scale decoder produces a dense saliency map.
+These design choices motivate a controlled comparison, but do not by
+themselves establish that temporal modeling improves accuracy. We therefore
+distinguish the implemented architecture from the experiments that remain to
+be run.
+
+\paragraph{Contributions.}
+This project makes the following implementation and evaluation contributions:
+\begin{itemize}
+    \item It defines a current-frame saliency-prediction task using panoramic
+    RGB clips and the corresponding final-frame saliency annotation.
+    \item It implements a lightweight MobileNetV3-based model with optional
+    temporal feature exchange and multi-scale decoding, together with a
+    single-frame baseline.
+    \item It specifies data-alignment checks and controlled ablations needed
+    to evaluate the contribution of temporal modeling without presuming a
+    performance gain.
+\end{itemize}
+
+\section{Method}
+\label{sec:method}
+
+\subsection{Problem statement, input, and output}
+
+Let \(I_t\) denote the RGB frame at time \(t\), and let \(S_t\) denote its
+provided saliency map. Given a clip of \(T\) frames ending at \(t\), the model
+predicts the saliency map for the final input frame:
+\begin{equation}
+    X_t = [I_{t-(T-1)}, \ldots, I_{t-1}, I_t],
+    \qquad
+    \hat{S}_t = f_\theta(X_t).
+    \label{eq:task}
+\end{equation}
+This is current-frame prediction, not future gaze forecasting. The target is
+the dataset-provided saliency annotation paired with \(I_t\).
+
+\paragraph{Input.}
+For the default temporal model, the input is \(T=16\) RGB frames with
+preprocessed tensor shape \([B,16,3,224,1120]\), where \(B\) is the batch
+size. The single-frame baseline uses the final frame \(I_t\) from this clip.
+
+\paragraph{Output.}
+The model predicts one saliency map for the final frame, with shape
+\([B,1,224,1120]\). The temporal model returns logits by default; the
+single-frame baseline applies sigmoid and returns values in \([0,1]\).
+Predictions must be converted to the representation expected by the selected
+loss and evaluation metrics.
+
+\paragraph{Illustrative example.}
+\begin{figure}[t]
+    \centering
+    \fbox{\parbox{0.92\linewidth}{
+        \centering
+        RGB clip \(\{I_{t-15},\ldots,I_t\}\)
+        \(\longrightarrow\)
+        saliency model
+        \(\longrightarrow\)
+        predicted map \(\hat{S}_t\)\\[2pt]
+        \small Schematic only; replace with a real input, ground-truth map,
+        and model prediction after inference has been run.
+    }}
+    \caption{Conceptual input-output example for current-frame saliency
+    prediction. This schematic contains no experimental prediction.}
+    \label{fig:io-example}
+\end{figure}
+
+\subsection{Architecture}
+
+The implemented \texttt{DriverGazeNet} contains a MobileNetV3-Large image
+encoder, optional TSM modules, per-stage temporal pooling, and a lightweight
+multi-scale saliency decoder. The encoder exposes features from four stages
+with channel dimensions \((24, 40, 112, 960)\). The decoder projects these
+features to a shared width, combines them in a top-down sequence, refines the
+fused features with depthwise-separable convolutions, and upsamples to the
+input resolution.
+
+\subsection{Temporal Shift Module}
+
+TSM exchanges feature channels across neighboring frames without introducing
+a conventional temporal convolution \cite{lin2019tsm}. In this
+implementation, the channel tensor is divided into groups: one group is
+shifted from the next frame, a second group from the previous frame, and the
+remaining channels stay at the current frame. The operation is inserted into
+residual blocks in the MobileNet feature extractor. At temporal boundaries,
+the shifted groups are zero-filled.
+
+\subsection{Temporal aggregation and output}
+
+After feature extraction, temporal pooling is applied independently to each
+selected encoder stage. The implementation supports last-frame selection,
+mean pooling, and learned attention pooling. The default configuration uses
+last-frame pooling. The decoder returns one saliency logit map at the input
+resolution; sigmoid may be applied for probability-map output.
+
+The single-frame baseline uses only \(I_t\), disables TSM, and applies sigmoid
+in the decoder. The temporal model and baseline should be trained with losses
+that match their output conventions: a probability output must not receive a
+second sigmoid operation inside the loss.
+
+\section{Experimental Evaluation}
+\label{sec:experiments}
+
+\subsection{Dataset}
+
+DriverGaze360 provides panoramic driving recordings with gaze-related
+annotations and additional modalities, including saliency, depth, and
+instance-segmentation data \cite{govil2026drivergaze360}. The original release
+stores videos and metadata. The official preparation script extracts video
+frames as numbered image files and unpacks instance-segmentation archives.
+Frame filenames are one-indexed to align with the \texttt{Frame} field in
+\texttt{sim\_gaze\_df.csv}.
+
+The official project supports broader object-level attention tasks. In
+contrast, this work uses RGB clips and the associated saliency map only. It
+does not train on depth or instance-segmentation targets and does not
+reconstruct a new saliency target from gaze coordinates.
+
+\subsection{Sampling and frame alignment}
+
+For the default settings, \(T=16\) and the frame stride is one. DriverGaze360
+videos are sampled at 30 frames per second, so the clip spans 0.5 seconds
+between its first and final frames. The default clip-start step is eight
+frames (approximately 0.267 seconds), and the loader skips the first 30
+frames of each recording.
+
+The official preparation script uses FFmpeg to extract RGB, saliency, and
+depth videos into numbered JPEG frames. This representation allows the
+loader to read selected frames by index and construct overlapping clips.
+The project-specific \texttt{DG360LiteDataset} checks that CSV frame IDs are
+integer-valued and strictly increasing, and that corresponding RGB and
+saliency filenames exist. It uses those frame IDs when loading samples.
+
+For the locally audited subset of 46 recordings, CSV frame IDs matched the
+RGB and saliency filenames, and inspected source images had dimensions of
+\(6400 \times 720\). These checks establish file-level alignment and observed
+shape consistency for the audited subset; they do not establish the semantic
+validity of every saliency annotation.
+
+\subsection{Panorama resizing}
+
+The loader resizes RGB and saliency images using the same
+aspect-preserving fit-and-center-pad transform to a \(224 \times 1120\)
+\((H \times W)\) canvas. For a \(6400 \times 720\) source image, the resized
+content is approximately \(1120 \times 126\) pixels \((W \times H)\), with
+zero padding above and below. RGB values are scaled to floating point and
+ImageNet-normalized; saliency values are scaled to \([0,1]\), but are not
+normalized to sum to one by the loader.
+
+The padding creates pixels outside the source image. Losses and metrics
+should therefore either exclude those pixels with a valid-image mask or
+explicitly justify treating them as background. This choice has not yet been
+validated in a complete training and evaluation pipeline.
+
+\subsection{Experimental setup}
+
+\subsubsection{Data split}
+
+The first experiments should preserve the dataset's original training and
+validation partitions. The project download script selects approximately
+20\% of recordings independently within each source split using a fixed
+random seed. This recording-level subset does not guarantee that drivers are
+disjoint across partitions. Accordingly, results from this setup must not be
+described as generalization to unseen drivers. A participant-grouped split
+would be required to support that claim.
+
+\subsubsection{Baselines and ablations}
+
+All models should use identical partitions, preprocessing, target
+normalization, and evaluation procedures. The planned comparisons are:
+\begin{enumerate}
+    \item A spatial-prior baseline, such as the mean training-set saliency map.
+    \item A single-frame MobileNetV3 model using only \(I_t\).
+    \item A 16-frame model with temporal aggregation but without TSM.
+    \item A 16-frame model with TSM.
+\end{enumerate}
+
+Temporal pooling modes (last, mean, or learned attention) should be treated as
+separate controlled ablations if they are evaluated. Selection of model
+variants and hyperparameters must use validation data only.
+
+\subsubsection{Training setup and evaluation metrics}
+
+The training report should state the optimizer, learning rate, batch size,
+epoch count, random seed, hardware, loss definition, and target
+normalization used in the actual run. These settings have not yet been
+confirmed by a completed experiment and are therefore not specified here as
+measured protocol.
+
+We plan to evaluate saliency predictions using Kullback--Leibler divergence
+(KLD), correlation coefficient (CC), similarity (SIM), and normalized
+scanpath saliency (NSS). Metric definitions and prediction/target
+normalization must be reported explicitly. NSS additionally requires a
+fixation map that is appropriate for the evaluated frame. If efficiency
+claims are made, model size and inference latency should also be measured
+and reported with hardware details.
+
+\subsubsection{Experimental environment}
+
+The hardware and software environment for a completed training or inference
+run has not been recorded in the verified project state. Before reporting
+results, record the GPU/CPU model, memory, operating system, Python and
+PyTorch versions, CUDA version (if applicable), input resolution, batch size,
+and inference timing procedure. These values are intentionally left
+unspecified rather than inferred from the development environment.
+
+\subsection{Results and current status}
+\label{sec:results}
+
+No complete training run or quantitative evaluation has been validated in
+the current project state. Consequently, no KLD, CC, SIM, NSS, latency, or
+model-size results are claimed. The verified work currently consists of the
+project data loader, frame-pairing checks on a local subset, preview
+functionality, and model forward-pass implementations. Training, checkpoint
+selection, and metric behavior still require end-to-end validation.
+
+\subsubsection{Quantitative results}
+
+The following table is a results template, not a report of measured
+performance. Fill it only after running the stated experiments with the
+same split, preprocessing, and metric definitions.
+
+\begin{table}[t]
+    \centering
+    \caption{Planned experiments. Quantitative results have not yet been
+    measured.}
+    \label{tab:planned}
+    \begin{tabular}{lccccc}
+        \toprule
+        Experiment & KLD & CC & SIM & NSS & Status \\
+        \midrule
+        Spatial prior & -- & -- & -- & -- & Not run \\
+        Single-frame & -- & -- & -- & -- & Not run \\
+        16-frame, no TSM & -- & -- & -- & -- & Not run \\
+        16-frame, with TSM & -- & -- & -- & -- & Not run \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\subsubsection{Qualitative results}
+
+No verified model predictions are available yet. After inference, replace the
+boxes below with a representative RGB frame, its dataset-provided saliency
+target, and the corresponding prediction. Select examples from the evaluation
+split, and do not choose examples solely because they make the model appear
+successful.
+
+\begin{figure}[t]
+    \centering
+    \setlength{\fboxsep}{5pt}
+    \fbox{\parbox[c][2.6cm][c]{0.27\linewidth}{\centering RGB input\\[2pt]
+    \small Replace with real frame}}
+    \hfill
+    \fbox{\parbox[c][2.6cm][c]{0.27\linewidth}{\centering Ground truth\\[2pt]
+    \small Replace with paired saliency}}
+    \hfill
+    \fbox{\parbox[c][2.6cm][c]{0.27\linewidth}{\centering Prediction\\[2pt]
+    \small Replace after inference}}
+    \caption{Qualitative comparison template. The boxes are placeholders and
+    are not model outputs.}
+    \label{fig:qualitative-template}
+\end{figure}
+
+\section{Limitations and Future Work}
+\label{sec:limitations}
+
+\subsection{Strengths of the current design}
+
+The project has a clearly scoped current-frame prediction target, a
+single-frame baseline for comparison, and a lightweight temporal mechanism
+whose contribution can be tested by ablation. The loader also checks
+frame-ID alignment and preserves the panoramic aspect ratio during resizing.
+These are design and implementation properties, not evidence of improved
+predictive performance.
+
+\subsection{Limitations}
+
+This paper describes an implementation and experimental plan rather than a
+completed empirical study. The local subset is only a fraction of the full
+dataset, and recording-level sampling does not ensure participant-level
+separation. File alignment and shape checks are necessary data-quality steps,
+but cannot verify that each target map semantically represents driver gaze.
+
+The panorama resize-and-pad operation also introduces regions outside the
+original image. The training loss and metrics should handle these pixels
+consistently, ideally with an explicit valid-image mask. The immediate next
+steps are to validate one forward/backward pass, overfit a small batch as a
+training sanity check, implement and validate the loss and metrics, and run
+the spatial-prior and single-frame baselines before the temporal ablations.
+Any claims about generalization to unseen drivers require a separate
+participant-held-out evaluation.
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+We define a current-frame driver visual-saliency prediction task on panoramic
+video and describe a lightweight MobileNetV3-based model with optional TSM
+and multi-scale decoding. A single-frame baseline provides the reference
+needed to test whether temporal information is useful. Since the training
+and evaluation pipeline has not yet been validated, the effectiveness of the
+temporal components remains an open empirical question.
+
+\bibliographystyle{ieeenat_fullname}
+\bibliography{references}
+
+\end{document}

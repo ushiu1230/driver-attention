@@ -180,6 +180,7 @@ class DriverGazeNet(nn.Module):
         pretrained=True,
         decoder_width=128,
         fold_div=8,
+        apply_sigmoid=False,
     ):
         super().__init__()
         if num_segments < 1:
@@ -209,6 +210,7 @@ class DriverGazeNet(nn.Module):
         self.decoder = SaliencyDecoder(
             in_channels=stage_channels,
             width=decoder_width,
+            apply_sigmoid=apply_sigmoid,
         )
 
     def forward(self, rgb):
@@ -252,3 +254,23 @@ class DriverGazeNet(nn.Module):
             for temporal_pool, feature in zip(self.temporal_pools, features)
         ]
         return self.decoder(pooled_features, output_size=(height, width))
+
+
+class SingleFrameSaliencyNet(DriverGazeNet):
+    """Single-frame MobileNetV3 baseline with probability-map output."""
+
+    def __init__(
+        self,
+        backbone_name="mobilenet_v3_large",
+        pretrained=True,
+        decoder_width=128,
+    ):
+        super().__init__(
+            backbone_name=backbone_name,
+            num_segments=1,
+            temporal_mode="last",
+            use_tsm=False,
+            pretrained=pretrained,
+            decoder_width=decoder_width,
+            apply_sigmoid=True,
+        )
