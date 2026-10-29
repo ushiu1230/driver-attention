@@ -1,5 +1,6 @@
 from torchvision.models import mobilenet_v3_large, MobileNet_V3_Large_Weights
 import torch
+
 model = mobilenet_v3_large(weights=MobileNet_V3_Large_Weights.DEFAULT)
 
 for i, layer in enumerate(model.features):

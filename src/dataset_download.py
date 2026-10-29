@@ -2,12 +2,14 @@
 import math
 import random
 from collections import defaultdict
+from pathlib import Path
 from huggingface_hub import HfApi, snapshot_download
 
 # Configuration
 REPO_ID = "dfki-av/drivergaze360"
 REPO_TYPE = "dataset"
-SAVE_DIR = "drivergaze360_subset"
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SAVE_DIR = PROJECT_ROOT / "data" / "raw" / "drivergaze360_subset"
 FRACTION = 0.20
 SEED = 42
 
@@ -79,7 +81,7 @@ snapshot_download(
     repo_id=REPO_ID,
     repo_type=REPO_TYPE,
     allow_patterns=selected_files,
-    local_dir=SAVE_DIR,
+    local_dir=str(SAVE_DIR),
 )
 
 print("Download completed.")

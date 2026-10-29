@@ -2,3 +2,7 @@ numpy
 matplotlib
 opencv-python
 Pillow
+pandas
+torch
+torchvision
+huggingface-hub

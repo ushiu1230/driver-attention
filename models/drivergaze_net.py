@@ -8,7 +8,7 @@ with tsm module, trained on DriverGaze360 dataset.
 import torch
 import torch.nn as nn
 from torchvision import models
-from models.saliency_decoder import SaliencyDecoder
+from .saliency_decoder import SaliencyDecoder
 
 # define backbone presets used by the driver-attention model builder
 # each entry: (constructor, weights enum, weights variant, feature indices, channels)

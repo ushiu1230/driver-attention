@@ -1,6 +1,5 @@
 import argparse
 import random
-import sys
 from pathlib import Path
 
 import cv2
@@ -9,13 +8,10 @@ import numpy as np
 from PIL import Image
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from dataset.dataset import resize_with_pad
+from ..dataset.dataset import resize_with_pad
 
 
-DEFAULT_ROOT = PROJECT_ROOT / "dataset" / "drivergaze360_subset" / "dataset" / "train"
+DEFAULT_ROOT = PROJECT_ROOT / "data" / "raw" / "drivergaze360_subset" / "dataset" / "train"
 PREVIEW_SIZE = (224, 1120)  # (H, W), matching DG360LiteDataset's fit-and-pad transform.
 RECORDING_COUNT = 3
 SAMPLE_COUNT = 4
