@@ -181,7 +181,12 @@ class DG360LiteDataset(Dataset):
             raise FileNotFoundError(f"Missing image: {image_path}")
 
         mode = ImageReadMode.RGB if kind == "rgb" else ImageReadMode.GRAY
-        image = decode_jpeg(read_file(str(image_path)), mode=mode)
+        try:
+            image = decode_jpeg(read_file(str(image_path)), mode=mode)
+        except (OSError, RuntimeError) as error:
+            raise RuntimeError(
+                f"Failed to read or decode {kind} image: {image_path}"
+            ) from error
         if not isinstance(image, torch.Tensor):
             raise TypeError(f"Expected one decoded image tensor from {image_path}")
         return image
