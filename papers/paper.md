@@ -212,6 +212,15 @@ remain necessary before the research question can be answered.
 | 16-frame, no TSM | — | — | — | — | Not run |
 | 16-frame, with TSM | — | — | — | — | Not run |
 
+Model: 
+============================
+Using DriverGazeNet experiment: baseline
+Total parameters: 5,683,737
+Trainable parameters: 5,683,737
+Model size (FP32): 21.68 MB
+============================
+
+
 ## 7. Limitations and next work
 
 This report describes a task and implementation plan, not a completed
