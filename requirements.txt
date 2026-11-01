@@ -7,3 +7,4 @@ torch
 torchvision
 huggingface-hub
 tensorboard
+tqdm

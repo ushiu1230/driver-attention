@@ -1,226 +1,240 @@
-from datetime import datetime
-from email.message import EmailMessage
-import logging
-import os
 from pathlib import Path
-import smtplib
 
 import torch
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from dataset.dataset import DG360LiteDataset
-from models import SingleFrameSaliencyNet
-from utils.metrics import SaliencyLoss
+from models.model_factory import EXPERIMENTS, build_model
+from utils.losses import SaliencyLoss
+from utils.metrics import SaliencyMetrics
 from utils.tflogger import TFLogger
 
 
-def notify_training_error(error, log_path):
-    email_user = os.environ.get("DRIVER_ATTENTION_EMAIL_USER")
-    email_password = os.environ.get("DRIVER_ATTENTION_EMAIL_PASSWORD")
-    if not email_user or not email_password:
-        logging.warning(
-            "Email alert not sent. Set DRIVER_ATTENTION_EMAIL_USER and "
-            "DRIVER_ATTENTION_EMAIL_PASSWORD."
+class Trainer:
+    """Train DriverGazeNet with the DriverGaze360 dataset."""
+
+    def __init__(self, run_id, args):
+        if args.experiment not in EXPERIMENTS:
+            raise ValueError(f"Unknown experiment: {args.experiment}")
+        if args.batch_size < 1 or args.num_epochs < 1:
+            raise ValueError("batch size and number of epochs must be positive")
+        if args.num_workers < 0:
+            raise ValueError("num-workers must be non-negative")
+        if args.w_mse < 0 or args.w_cc < 0:
+            raise ValueError("loss weights must be non-negative")
+
+        self.run_id = run_id
+        self.args = args
+        self.experiment = args.experiment
+        self.experiment_config = EXPERIMENTS[self.experiment]
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.use_amp = args.use_amp and self.device.type == "cuda"
+        self.epochs_run = 0
+        self.best_val_loss = float("inf")
+
+        self.logger = TFLogger(run_id, args.save_dir, args=args)
+        if args.use_amp and not self.use_amp:
+            print("AMP requested but CUDA is unavailable; using full precision.")
+        if self.use_amp:
+            print(f"Using AMP on {self.device}")
+
+        self.train_ds = self._make_dataset(args.train_path)
+        self.val_ds = self._make_dataset(args.val_path)
+        self.train_dl = DataLoader(
+            self.train_ds,
+            batch_size=args.batch_size,
+            shuffle=True,
+            num_workers=args.num_workers,
+            pin_memory=self.device.type == "cuda",
         )
-        return
-
-    email_host = os.environ.get("DRIVER_ATTENTION_EMAIL_HOST", "smtp.gmail.com")
-    try:
-        email_port = int(os.environ.get("DRIVER_ATTENTION_EMAIL_PORT", "465"))
-    except ValueError:
-        logging.error("DRIVER_ATTENTION_EMAIL_PORT must be an integer.")
-        return
-    recipient = "ushiu1230@gmail.com"
-    message = EmailMessage()
-    message["Subject"] = "Driver-attention training failed"
-    message["From"] = email_user
-    message["To"] = recipient
-    message.set_content(
-        "Training stopped because of an error.\n"
-        f"Error: {type(error).__name__}: {error}\n"
-        f"The full training log is attached: {log_path}"
-    )
-    try:
-        message.add_attachment(
-            log_path.read_bytes(),
-            maintype="text",
-            subtype="plain",
-            filename=log_path.name,
-        )
-    except OSError:
-        logging.exception("Could not attach the training log.")
-
-    try:
-        with smtplib.SMTP_SSL(email_host, email_port, timeout=15) as server:
-            server.login(email_user, email_password)
-            server.send_message(message)
-        logging.info("Training error email sent to %s.", recipient)
-    except (OSError, smtplib.SMTPException) as notification_error:
-        logging.exception(
-            "Could not send training error email: %s", notification_error
+        self.val_dl = DataLoader(
+            self.val_ds,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=args.num_workers,
+            pin_memory=self.device.type == "cuda",
         )
 
+        self.model = build_model(args).to(self.device)
 
-def run_epoch(
-    model,
-    loader,
-    criterion,
-    device,
-    optimizer=None,
-    logger=None,
-    phase="train",
-    step_offset=0,
-):
-    training = optimizer is not None
-    model.train(training)
+        self.optimizer = torch.optim.AdamW(
+            self.model.parameters(), lr=args.lr, weight_decay=args.weight_decay
+        )
+        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            self.optimizer, mode="min", factor=0.5, patience=args.lr_patience
+        )
+        self.scaler = torch.amp.GradScaler("cuda", enabled=self.use_amp)
+        self.criterion = SaliencyLoss(
+            lambda_mse=args.w_mse, lambda_cc=args.w_cc
+        )
+        self.metrics = SaliencyMetrics()
 
-    total_loss = 0.0
-    total_samples = 0
+        if args.resume:
+            if not args.ckpt:
+                raise ValueError("--resume requires --ckpt")
+            self.load_checkpoint(args.ckpt)
 
-    context = torch.enable_grad if training else torch.no_grad
-    with context():
-        for batch_index, batch in enumerate(loader):
-            rgb = batch["rgb"].to(device)  # [B, T, 3, H, W]
-            target = batch["sal"].to(device)  # [B, 1, H, W]
+        print(
+            f"Train: {len(self.train_ds)} samples | validation: {len(self.val_ds)} "
+            f"| experiment={self.experiment} | device={self.device}"
+        )
 
-            # Bỏ mẫu có target rỗng để tránh chuẩn hóa phân phối không hợp lệ.
-            valid = target.flatten(start_dim=1).sum(dim=1) > 1e-8
-            if not valid.any():
+    def _make_dataset(self, root):
+        return DG360LiteDataset(
+            root=root,
+            T=self.experiment_config["input_frames"],
+            frame_stride=self.args.frame_stride,
+            clip_step=self.args.clip_step,
+            img_size=tuple(self.args.img_size),
+            skip_first=self.args.skip_first,
+            target_offset=self.experiment_config["target_offset"],
+        )
+
+    def _predict_saliency(self, rgb, mask):
+        with torch.autocast(
+            device_type=self.device.type, dtype=torch.float16, enabled=self.use_amp
+        ):
+            prediction = self.model(rgb)
+
+        valid = mask > 0
+        if not valid.flatten(1).any(dim=1).all():
+            raise ValueError("A batch item has no valid image pixels")
+        return prediction.float().masked_fill(~valid, 0.0)
+
+    def _valid_samples(self, batch):
+        rgb = batch["rgb"].to(self.device, non_blocking=True)
+        target = batch["sal"].to(self.device, non_blocking=True).float()
+        mask = batch["mask"].to(self.device, non_blocking=True) > 0
+        target = target.masked_fill(~mask, 0)
+        valid = target.flatten(1).sum(dim=1) > 0
+        return rgb[valid], target[valid], mask[valid]
+
+    def _run_epoch(self, epoch, training):
+        self.model.train(training)
+        loader = self.train_dl if training else self.val_dl
+        phase = "train" if training else "val"
+        loss_total = 0.0
+        metric_totals = {"KLD": 0.0, "CC": 0.0, "SIM": 0.0, "peak_px": 0.0}
+        sample_count = 0
+        progress = tqdm(
+            loader,
+            total=len(loader),
+            desc=f"Epoch {epoch + 1} | {phase}",
+            disable=not self.args.progress,
+        )
+
+        for step, batch in enumerate(progress):
+            rgb, target, mask = self._valid_samples(batch)
+            if rgb.shape[0] == 0:
                 continue
 
-            rgb = rgb[valid]
-            target = target[valid]
-
             if training:
-                optimizer.zero_grad(set_to_none=True)
+                self.optimizer.zero_grad(set_to_none=True)
 
-            prediction = model(rgb)
-            loss = criterion(prediction, target)
+            with torch.set_grad_enabled(training):
+                prediction = self._predict_saliency(rgb, mask)
+                loss = self.criterion(prediction, target, mask)
+                if training:
+                    self.scaler.scale(loss).backward()
+                    self.scaler.unscale_(self.optimizer)
+                    if self.args.grad_clip > 0:
+                        torch.nn.utils.clip_grad_norm_(
+                            self.model.parameters(), self.args.grad_clip
+                        )
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
 
-            if training:
-                loss.backward()
-                optimizer.step()
+            batch_count = rgb.shape[0]
+            loss_total += loss.detach().item() * batch_count
+            batch_metrics = self.metrics(prediction.detach(), target, mask)
+            for name, values in batch_metrics.items():
+                metric_totals[name] += values.sum().item()
+            sample_count += batch_count
 
-            if logger is not None:
-                logger.log(
-                    {"kld": loss.detach()},
-                    f"batch/{phase}",
-                    step_offset + batch_index,
+            if step % self.args.log_interval == 0:
+                self.logger.log(
+                    {"loss": loss.detach()}, phase, step=epoch * len(loader) + step
                 )
+                if step == 0:
+                    self.logger.log_images(
+                        rgb, prediction, target, phase=f"{phase}/sal",
+                        step=epoch,
+                    )
 
-            count = target.size(0)
-            total_loss += loss.detach().item() * count
-            total_samples += count
+        if sample_count == 0:
+            raise RuntimeError(f"No non-empty saliency maps were found in {phase} data")
 
-    if total_samples == 0:
-        raise RuntimeError("Epoch không có mẫu saliency hợp lệ.")
+        mean_loss = loss_total / sample_count
+        metrics = {
+            name: value / sample_count for name, value in metric_totals.items()
+        }
+        return mean_loss, metrics
 
-    return total_loss / total_samples
+    def save_checkpoint(self, epoch, val_loss, val_metrics, filename):
+        checkpoint = {
+            "model": self.model.state_dict(),
+            "optimizer": self.optimizer.state_dict(),
+            "scheduler": self.scheduler.state_dict(),
+            "scaler": self.scaler.state_dict(),
+            "epoch": epoch,
+            "best_val_loss": self.best_val_loss,
+            "val_loss": val_loss,
+            "val_metrics": val_metrics,
+            "experiment": self.experiment,
+            "output": "sigmoid",
+            "decoder_norm": "bn",
+            "args": vars(self.args),
+        }
+        out_path = Path(self.logger.save_dir) / filename
+        torch.save(checkpoint, out_path)
+        print(f"Saved checkpoint: {out_path}")
 
+    def load_checkpoint(self, checkpoint_path):
+        path = Path(checkpoint_path)
+        if not path.is_file():
+            raise FileNotFoundError(f"Checkpoint not found: {path}")
+        checkpoint = torch.load(path, map_location=self.device, weights_only=True)
+        self.model.load_state_dict(checkpoint["model"])
+        self.optimizer.load_state_dict(checkpoint["optimizer"])
+        if "scheduler" in checkpoint:
+            self.scheduler.load_state_dict(checkpoint["scheduler"])
+        if "scaler" in checkpoint:
+            self.scaler.load_state_dict(checkpoint["scaler"])
+        self.epochs_run = int(checkpoint["epoch"]) + 1
+        self.best_val_loss = float(checkpoint.get("best_val_loss", float("inf")))
 
-def main():
-    run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
-    log_dir = Path("results") / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / f"training_{run_id}.log"
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(message)s",
-        handlers=[
-            logging.FileHandler(log_path, encoding="utf-8"),
-            logging.StreamHandler(),
-        ],
-        force=True,
-    )
-    logging.info("Training log: %s", log_path.resolve())
+    def train(self):
+        try:
+            for epoch in range(self.epochs_run, self.args.num_epochs):
+                train_loss, _ = self._run_epoch(epoch, training=True)
+                val_loss, val_metrics = self._run_epoch(epoch, training=False)
+                self.scheduler.step(val_loss)
+                improved = val_loss < self.best_val_loss
+                if improved:
+                    self.best_val_loss = val_loss
 
-    logger = None
-    try:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-        train_ds = DG360LiteDataset(
-            root="dataset/drivergaze360_subset/dataset/train",
-            T=16,
-            frame_stride=1,
-            clip_step=8,
-            img_size=(224, 1120),
-        )
-        val_ds = DG360LiteDataset(
-            root="dataset/drivergaze360_subset/dataset/val",
-            T=16,
-            frame_stride=1,
-            clip_step=8,
-            img_size=(224, 1120),
-        )
-
-        train_loader = DataLoader(
-            train_ds, batch_size=2, shuffle=True, num_workers=2
-        )
-        val_loader = DataLoader(
-            val_ds, batch_size=2, shuffle=False, num_workers=2
-        )
-
-        model = SingleFrameSaliencyNet(pretrained=True).to(device)
-        criterion = SaliencyLoss(lambda_cc=0.0)
-        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
-
-        best_val_loss = float("inf")
-        logger = TFLogger(run_id=run_id, save_dir="tensorboard")
-        logging.info("TensorBoard log directory: %s", logger.save_dir)
-
-        for epoch in range(20):
-            train_loss = run_epoch(
-                model,
-                train_loader,
-                criterion,
-                device,
-                optimizer=optimizer,
-                logger=logger,
-                phase="train",
-                step_offset=epoch * len(train_loader),
-            )
-            val_loss = run_epoch(
-                model,
-                val_loader,
-                criterion,
-                device,
-                optimizer=None,
-                logger=logger,
-                phase="val",
-                step_offset=epoch * len(val_loader),
-            )
-
-            logging.info(
-                f"Epoch {epoch + 1:02d}: "
-                f"train KLD={train_loss:.4f}, val KLD={val_loss:.4f}"
-            )
-            logger.log_epoch(train_loss, val_loss, {}, epoch + 1)
-            logger.log(
-                {"learning_rate": optimizer.param_groups[0]["lr"]},
-                "epoch",
-                epoch + 1,
-            )
-            logger.flush()
-
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                torch.save(
-                    {
-                        "epoch": epoch + 1,
-                        "model": model.state_dict(),
-                        "optimizer": optimizer.state_dict(),
-                        "val_loss": val_loss,
-                    },
-                    "best_single_frame.pt",
+                current_lr = self.optimizer.param_groups[0]["lr"]
+                print(
+                    f"Epoch {epoch + 1:02d}: train loss={train_loss:.6f} | "
+                    f"val loss={val_loss:.6f} KLD={val_metrics['KLD']:.4f} "
+                    f"CC={val_metrics['CC']:.4f} "
+                    f"SIM={val_metrics['SIM']:.4f} "
+                    f"peak={val_metrics['peak_px']:.2f} px | lr={current_lr:.2e}"
                 )
-    except Exception as error:
-        logging.exception("Training stopped because of an error.")
-        notify_training_error(error, log_path.resolve())
-        raise
-    finally:
-        if logger is not None:
-                logger.close()
+                self.logger.log_epoch(
+                    train_loss, val_loss, val_metrics, epoch + 1
+                )
+                self.save_checkpoint(
+                    epoch, val_loss, val_metrics, "last.pt"
+                )
+                if improved:
+                    self.save_checkpoint(
+                        epoch, val_loss, val_metrics, "best.pt"
+                    )
+                self.logger.flush()
+        finally:
+            self.logger.close()
 
 
-if __name__ == "__main__":
-    main()
+__all__ = ["Trainer"]

@@ -56,10 +56,8 @@ class SaliencyDecoder(nn.Module):
             )
             x = self.refine[i](x + self.lateral[i](features[i]))
 
-        x = F.interpolate(
-            x, size=output_size, mode="bilinear", align_corners=False
-        )
         x = self.head(x)
+        x = F.interpolate(x, size=output_size, mode="bilinear", align_corners=False)
         if self.apply_sigmoid:
             x = x.sigmoid()
         return x

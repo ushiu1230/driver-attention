@@ -45,6 +45,8 @@ class DG360LiteDataset(Dataset):
     the dataset-provided saliency map for frame ``t`` as its target. Both are
     resized with preserved aspect ratio to fit ``img_size``, then center-padded
     with zeros to that fixed canvas size.
+    ``target_offset`` lets a short input (such as the single-frame baseline)
+    sample the same target frames as a longer temporal clip.
 
     Expected recording layout:
       root/train/C001/001/001-1/rgb/000001.jpg
@@ -62,6 +64,7 @@ class DG360LiteDataset(Dataset):
         clip_step=8,
         img_size=(224, 1120),
         skip_first=30,
+        target_offset=0,
     ):
         self.root = Path(root)
         self.T = int(T)
@@ -69,9 +72,12 @@ class DG360LiteDataset(Dataset):
         self.clip_step = int(clip_step)
         self.img_size = tuple(img_size)  # (H, W)
         self.skip_first = int(skip_first)
+        self.target_offset = int(target_offset)
 
         if self.T < 1 or self.stride < 1 or self.clip_step < 1:
             raise ValueError("T, frame_stride, and clip_step must be positive integers")
+        if self.target_offset < 0:
+            raise ValueError("target_offset must be non-negative")
         if len(self.img_size) != 2 or any(size < 1 for size in self.img_size):
             raise ValueError("img_size must contain positive (height, width) values")
         if not self.root.exists():
@@ -163,7 +169,9 @@ class DG360LiteDataset(Dataset):
         samples = []
         for recording_idx, n_frames in enumerate(self.data_len):
             # Largest valid start index, inclusive.
-            last_start = n_frames - 1 - (self.T - 1) * self.stride
+            last_start = (
+                n_frames - 1 - self.target_offset - (self.T - 1) * self.stride
+            )
             for start in range(self.skip_first, last_start + 1, self.clip_step):
                 samples.append((recording_idx, start))
         return samples
@@ -194,7 +202,8 @@ class DG360LiteDataset(Dataset):
     def __getitem__(self, index):
         recording_idx, start = self.samples[index]
         frame_positions = [
-            start + i * self.stride for i in range(self.T)
+            start + self.target_offset + i * self.stride
+            for i in range(self.T)
         ]
         frame_ids = [
             self.frame_ids[recording_idx][position] for position in frame_positions
@@ -221,7 +230,11 @@ class DG360LiteDataset(Dataset):
                 f"RGB={tuple(target_rgb_size)}, "
                 f"saliency={tuple(saliency.shape[-2:])}"
             )
-        saliency = resize_with_pad(saliency, self.img_size)
-        saliency = self.gt_tf(saliency)  # [1, H, W], float in [0, 1]
+        # MỚI: mask vùng ảnh thật, tạo từ kích thước gốc
+        valid = resize_with_pad(torch.ones_like(saliency), self.img_size)
+        mask = (valid > 0).float()
 
-        return {"rgb": rgb_clip, "sal": saliency}
+        saliency = resize_with_pad(saliency, self.img_size)
+        saliency = self.gt_tf(saliency)
+
+        return {"rgb": rgb_clip, "sal": saliency, "mask": mask}

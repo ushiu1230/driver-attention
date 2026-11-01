@@ -168,7 +168,8 @@ class TemporalPool(nn.Module):
 class DriverGazeNet(nn.Module):
     """Predict the final frame's saliency map from an RGB clip.
 
-    Input: [B, T, 3, H, W]. Output: saliency logits [B, 1, H, W].
+    Input: [B, T, 3, H, W]. Output is [B, 1, H, W]; ``apply_sigmoid``
+    controls whether it contains saliency intensities or raw logits.
     """
 
     def __init__(
@@ -257,7 +258,7 @@ class DriverGazeNet(nn.Module):
 
 
 class SingleFrameSaliencyNet(DriverGazeNet):
-    """Single-frame MobileNetV3 baseline with probability-map output."""
+    """Single-frame MobileNetV3 model with sigmoid saliency output."""
 
     def __init__(
         self,

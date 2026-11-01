@@ -1,2 +1,5 @@
 """Command-line utilities for the driver attention project."""
-from .metrics import SaliencyLoss
+from .losses import SaliencyLoss
+from .metrics import SaliencyMetrics
+
+__all__ = ["SaliencyLoss", "SaliencyMetrics"]
