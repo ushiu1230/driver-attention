@@ -47,17 +47,20 @@ python main.py --experiment temporal_mean_pool --name temporal-mean --num-epochs
 ```
 
 The experiment definitions select clip length, TSM, pooling mode, and target
-frame offset. Paths default to `dataset/drivergaze360_subset/dataset/train`
-and `.../val`; override them with `--train-path` and `--val-path`. Validation
+frame offset. Training paths default to
+`data/raw/drivergaze360/trainval/dataset/train` and
+`data/raw/drivergaze360/trainval/dataset/val`; override them with
+`--train-path` and `--val-path` if your data is stored elsewhere. Validation
 reports KLD, CC, SIM, and peak distance in pixels; the best checkpoint is
-selected by the validation training objective.
+selected by validation loss.
+
 The decoder applies sigmoid during training to produce continuous saliency
-intensities in `[0, 1]`. By default, training uses the author's
-sum-normalized KLD plus correlation objective (`--w-kld 1 --w-cc 1`);
-masked pixel-wise MSE is available with `--w-mse`. The loss and KLD/SIM
-metrics normalize copies of the maps into spatial distributions, while CC and
-peak distance operate on the maps over valid image pixels. Inference saves
-both `_saliency.npy` (intensities) and `_prob.npy` (sum-normalized density).
+intensities in `[0, 1]`. By default, training uses masked pixel-wise MSE
+(`--w-mse 1 --w-cc 0`); an optional correlation loss can be enabled with
+`--w-cc`. The MSE and correlation loss operate on valid pixels. KLD and SIM
+metrics normalize copies of prediction and target into spatial distributions,
+while CC and peak distance operate on intensity maps. Inference saves both
+`_saliency.npy` (intensities) and `_prob.npy` (sum-normalized density).
 
 ## Dataset splits
 
@@ -74,22 +77,30 @@ python scripts/dataset_download.py --train-fraction 1.0
 ```
 
 By default, train/validation downloads go to
-`data/raw/drivergaze360_split/trainval`, and held-out test data goes to
-`data/raw/drivergaze360_split/test`. The test recordings retain their source
-path component `dataset/train`, but live under the separate test root; do not
-copy them into the training root. After preprocessing each root separately,
-the training paths are `.../trainval/dataset/train` and
-`.../trainval/dataset/val`; the held-out test path is
-`.../test/dataset/train`.
+`data/raw/drivergaze360/trainval`, and held-out test data goes to
+`data/raw/drivergaze360/test`. Do not copy held-out test recordings into a
+training split. After downloading, extract the video frames separately for
+each root. From Git Bash or WSL, run:
+
+```bash
+bash scripts/prepare_dataset.sh data/raw/drivergaze360/trainval
+bash scripts/prepare_dataset.sh data/raw/drivergaze360/test
+```
+
+The training paths are
+`data/raw/drivergaze360/trainval/dataset/train` and
+`data/raw/drivergaze360/trainval/dataset/val`. The test loader can use
+`data/raw/drivergaze360/test` as its root because it discovers recording
+folders recursively.
 
 Checkpoints and TensorBoard logs are written to
 `checkpoints/<run-name>/`; both `best.pt` and `last.pt` are saved.
-Resume with `--resume --ckpt <path-to-last.pt>`. If the checkpoint was trained
-with different loss weights, model and optimizer states are restored while the
-learning-rate scheduler and best-validation-loss tracker are reset. To export
-a saliency map:
+Resume with `--resume --ckpt <path-to-last.pt>`. Resume restores model,
+optimizer, scheduler, and scaler state, so use the same experiment and loss
+configuration for a continuous run. To export a saliency map, replace the
+example image path with an extracted RGB frame:
 
 ```powershell
 python infer.py --checkpoint checkpoints/baseline/best.pt `
-  --image dataset/drivergaze360_subset/dataset/test/C017/012/002/rgb/000040.jpg
+  --image "C:\path\to\extracted\rgb\000040.jpg"
 ```

@@ -9,8 +9,8 @@ from huggingface_hub import HfApi, snapshot_download
 REPO_ID = "dfki-av/drivergaze360"
 REPO_TYPE = "dataset"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SAVE_DIR = PROJECT_ROOT / "data" / "raw" / "drivergaze360_split" / "trainval"
-TEST_SAVE_DIR = PROJECT_ROOT / "data" / "raw" / "drivergaze360_split" / "test"
+SAVE_DIR = PROJECT_ROOT / "data" / "raw" / "drivergaze360" / "trainval"
+TEST_SAVE_DIR = PROJECT_ROOT / "data" / "raw" / "drivergaze360" / "test"
 TRAIN_FRACTION = 1.0
 TEST_DRIVER_FRACTION = 0.10
 OTHER_SPLIT_FRACTION = 0.20

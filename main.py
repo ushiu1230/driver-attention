@@ -18,12 +18,12 @@ def parse_args(argv=None):
     parser.add_argument("--save-dir", default="./checkpoints")
     parser.add_argument(
         "--train-path",
-        default="./dataset/drivergaze360_subset/dataset/train",
+        default="./data/raw/drivergaze360/trainval/dataset/train",
         help="Training split containing recording folders",
     )
     parser.add_argument(
         "--val-path",
-        default="./dataset/drivergaze360_subset/dataset/val",
+        default="./data/raw/drivergaze360/trainval/dataset/val",
         help="Validation split containing recording folders",
     )
     parser.add_argument("--num-epochs", type=int, default=20)

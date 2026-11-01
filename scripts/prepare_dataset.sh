@@ -13,7 +13,7 @@
 
 set -uo pipefail
 
-ROOT=${1:-./04_Projects/driver-attention/drivergaze360_subset}
+ROOT=${1:-./data/raw/drivergaze360/trainval}
 JOBS=${2:-$(nproc)}
 
 # One recording. Each modality is unpacked into a .partial folder first so an

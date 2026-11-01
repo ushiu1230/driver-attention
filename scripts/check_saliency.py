@@ -11,7 +11,15 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 from ..dataset.dataset import resize_with_pad
 
 
-DEFAULT_ROOT = PROJECT_ROOT / "data" / "raw" / "drivergaze360_subset" / "dataset" / "train"
+DEFAULT_ROOT = (
+    PROJECT_ROOT
+    / "data"
+    / "raw"
+    / "drivergaze360"
+    / "trainval"
+    / "dataset"
+    / "train"
+)
 PREVIEW_SIZE = (224, 1120)  # (H, W), matching DG360LiteDataset's fit-and-pad transform.
 RECORDING_COUNT = 3
 SAMPLE_COUNT = 4
