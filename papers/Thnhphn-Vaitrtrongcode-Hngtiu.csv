@@ -1,7 +1,0 @@
-"Thành phần","Vai trò trong code","Hướng tối ưu"
-"lambda_mse","Trọng số masked MSE","MSE giảm là tốt"
-"lambda_cc","Trọng số CC loss","Nếu CC được đưa vào loss dưới dạng 1−CC1-CC1−CC hoặc −CC-CC−CC, thì loss giảm tương ứng với CC tăng"
-"KLD","Metric đánh giá phân phối saliency","Giảm là tốt"
-"CC","Metric đánh giá tương quan cấu trúc","Tăng là tốt"
-"SIM","Metric đánh giá mức trùng phân phối","Tăng là tốt"
-"peak_px","Metric sai số vị trí đỉnh attention","Giảm là tốt"
