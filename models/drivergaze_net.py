@@ -165,6 +165,36 @@ class TemporalPool(nn.Module):
             ).sum(dim=1)
 
 
+class LearnableTemporalPE(nn.Module):
+    def __init__(self, num_frames=16, channels=960):
+        super().__init__()
+        if num_frames < 1 or channels < 1:
+            raise ValueError("num_frames and channels must be positive")
+
+        self.temporal_pe = nn.Parameter(
+            torch.zeros(1, num_frames, channels, 1, 1)
+        )
+
+        nn.init.trunc_normal_(self.temporal_pe, std=0.02)
+
+    def forward(self, x):
+        if x.ndim != 5:
+            raise ValueError(
+                f"Temporal PE expects [B, T, C, H, W], got {tuple(x.shape)}"
+            )
+        if x.shape[1] != self.temporal_pe.shape[1]:
+            raise ValueError(
+                f"Temporal PE expects T={self.temporal_pe.shape[1]}, "
+                f"got T={x.shape[1]}"
+            )
+        if x.shape[2] != self.temporal_pe.shape[2]:
+            raise ValueError(
+                f"Temporal PE expects C={self.temporal_pe.shape[2]}, "
+                f"got C={x.shape[2]}"
+            )
+        return x + self.temporal_pe
+
+
 class DriverGazeNet(nn.Module):
     """Predict the final frame's saliency map from an RGB clip.
 
@@ -180,6 +210,7 @@ class DriverGazeNet(nn.Module):
         use_tsm=True,
         pretrained=True,
         decoder_width=128,
+        dropout=0.1,
         fold_div=8,
         apply_sigmoid=False,
     ):
@@ -204,7 +235,9 @@ class DriverGazeNet(nn.Module):
 
         if use_tsm:
             insert_tsm(self.backbone.features, num_segments, fold_div)
-
+        self.temporal_pe = LearnableTemporalPE(
+            num_frames=num_segments, channels=stage_channels[-1]
+        )
         self.temporal_pools = nn.ModuleList(
             TemporalPool(temporal_mode, channels) for channels in stage_channels
         )
@@ -212,7 +245,21 @@ class DriverGazeNet(nn.Module):
             in_channels=stage_channels,
             width=decoder_width,
             apply_sigmoid=apply_sigmoid,
+            dropout=dropout,
         )
+
+    def load_checkpoint_weights(self, saved_state):
+        temporal_pe_key = "temporal_pe.temporal_pe"
+        if temporal_pe_key not in saved_state:
+            saved_state = saved_state.copy()
+            saved_state[temporal_pe_key] = torch.zeros_like(
+                self.temporal_pe.temporal_pe
+            )
+            print(
+                "Checkpoint has no temporal PE weights; initializing the "
+                "temporal PE to zero."
+            )
+        self.load_state_dict(saved_state)
 
     def forward(self, rgb):
         if rgb.ndim != 5:
@@ -227,6 +274,12 @@ class DriverGazeNet(nn.Module):
         if self.use_tsm and num_frames != self.num_segments:
             raise ValueError(
                 f"Expected T={self.num_segments} frames for TSM, got T={num_frames}"
+            )
+
+        if self.temporal_mode != "last" and num_frames != self.num_segments:
+            raise ValueError(
+                f"Expected T={self.num_segments} frames for temporal pooling, "
+                f"got T={num_frames}"
             )
 
         if not self.use_tsm and self.temporal_mode == "last":
@@ -250,6 +303,23 @@ class DriverGazeNet(nn.Module):
                 f"found {len(features)} of {len(self.stage_indices)}"
             )
 
+        if self.temporal_mode != "last" and num_frames > 1:
+            final_feature = features[-1]
+            feature_batch, channels, feature_height, feature_width = (
+                final_feature.shape
+            )
+            temporal_feature = final_feature.reshape(
+                batch_size,
+                num_frames,
+                channels,
+                feature_height,
+                feature_width,
+            )
+            temporal_feature = self.temporal_pe(temporal_feature)
+            features[-1] = temporal_feature.reshape(
+                feature_batch, channels, feature_height, feature_width
+            )
+
         pooled_features = [
             temporal_pool(feature, batch_size, num_frames)
             for temporal_pool, feature in zip(self.temporal_pools, features)
@@ -258,13 +328,15 @@ class DriverGazeNet(nn.Module):
 
 
 class SingleFrameSaliencyNet(DriverGazeNet):
-    """Single-frame MobileNetV3 model with sigmoid saliency output."""
+    """Single-frame MobileNetV3 saliency model."""
 
     def __init__(
         self,
         backbone_name="mobilenet_v3_large",
         pretrained=True,
         decoder_width=128,
+        apply_sigmoid=True,
+        dropout=0.1,
     ):
         super().__init__(
             backbone_name=backbone_name,
@@ -273,5 +345,6 @@ class SingleFrameSaliencyNet(DriverGazeNet):
             use_tsm=False,
             pretrained=pretrained,
             decoder_width=decoder_width,
-            apply_sigmoid=True,
+            apply_sigmoid=apply_sigmoid,
+            dropout=dropout,
         )

@@ -68,7 +68,8 @@ def build_model(args) -> nn.Module:
         use_tsm=config["use_tsm"],
         pretrained=not args.no_pretrained,
         decoder_width=args.decoder_width,
-        apply_sigmoid=True,
+        dropout=args.dropout,
+        apply_sigmoid=False,
     )
     print(f"Using DriverGazeNet experiment: {args.experiment}")
     print_model_info(model)

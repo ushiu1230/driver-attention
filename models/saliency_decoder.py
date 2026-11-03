@@ -4,14 +4,21 @@ import torch.nn.functional as F
 
 class SaliencyDecoder(nn.Module):
     def __init__(
-        self, in_channels=(24, 40, 112, 960), width=128, apply_sigmoid=False
+        self,
+        in_channels=(24, 40, 112, 960),
+        width=128,
+        apply_sigmoid=False,
+        dropout=0.1,
     ):
         super().__init__()
         if not in_channels or any(channels < 1 for channels in in_channels):
             raise ValueError("in_channels must contain positive channel counts")
         if width < 1:
             raise ValueError("width must be positive")
+        if not 0 <= dropout < 1:
+            raise ValueError("dropout must be in [0, 1)")
         self.apply_sigmoid = apply_sigmoid
+        self.dropout = nn.Dropout2d(dropout)
 
         self.lateral = nn.ModuleList([
             nn.Sequential(
@@ -56,7 +63,7 @@ class SaliencyDecoder(nn.Module):
             )
             x = self.refine[i](x + self.lateral[i](features[i]))
 
-        x = self.head(x)
+        x = self.head(self.dropout(x))
         x = F.interpolate(x, size=output_size, mode="bilinear", align_corners=False)
         if self.apply_sigmoid:
             x = x.sigmoid()
