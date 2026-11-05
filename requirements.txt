@@ -8,3 +8,4 @@ torchvision
 huggingface-hub
 tensorboard
 tqdm
+fvcore
