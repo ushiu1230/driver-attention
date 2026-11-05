@@ -12,6 +12,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SAVE_DIR = PROJECT_ROOT / "data" / "raw" / "drivergaze360" / "trainval"
 TEST_SAVE_DIR = PROJECT_ROOT / "data" / "raw" / "drivergaze360" / "test"
 TRAIN_FRACTION = 1.0
+VAL_FRACTION = 1.0
 TEST_DRIVER_FRACTION = 0.10
 OTHER_SPLIT_FRACTION = 0.20
 SEED = 42
@@ -26,6 +27,15 @@ parser.add_argument(
     type=float,
     default=TRAIN_FRACTION,
     help="Fraction of eligible training recordings to download (default: 1.0).",
+)
+parser.add_argument(
+    "--val-fraction",
+    type=float,
+    default=VAL_FRACTION,
+    help=(
+        "Fraction of the official validation split to download "
+        "(default: 1.0, the complete split)."
+    ),
 )
 parser.add_argument(
     "--output-dir",
@@ -45,9 +55,16 @@ parser.add_argument(
     default=TEST_DRIVER_FRACTION,
     help="Fraction of original training drivers held out for test (default: 0.10).",
 )
+parser.add_argument(
+    "--val-only",
+    action="store_true",
+    help="Download only the selected official validation recordings.",
+)
 args = parser.parse_args()
 if not 0 < args.train_fraction <= 1:
     parser.error("--train-fraction must be greater than 0 and at most 1")
+if not 0 < args.val_fraction <= 1:
+    parser.error("--val-fraction must be greater than 0 and at most 1")
 if not 0 < args.test_driver_fraction < 1:
     parser.error("--test-driver-fraction must be greater than 0 and less than 1")
 save_dir = args.output_dir
@@ -85,17 +102,44 @@ for (split, recording_dir), files in recordings.items():
     if KEEP_FILES.issubset(files.keys()):
         eligible[split].append((recording_dir, files))
 
-# Preserve the previous seeded selection for validation and any other
-# non-training splits while holding out complete drivers from original train.
+# Keep non-training split sampling deterministic. Download the complete
+# official validation split by default; other source splits remain sampled.
 legacy_rng = random.Random(SEED)
-previous_selection = {}
+selected_non_train = {}
 for split in sorted(eligible):
     candidates = sorted(eligible[split], key=lambda x: x[0])
-    n = max(1, math.ceil(len(candidates) * OTHER_SPLIT_FRACTION))
+    fraction = args.val_fraction if split == "val" else OTHER_SPLIT_FRACTION
+    n = max(1, math.ceil(len(candidates) * fraction))
     n = min(n, len(candidates))
-    previous_selection[split] = sorted(
-        legacy_rng.sample(candidates, n), key=lambda x: x[0]
+    chosen = (
+        candidates
+        if fraction == 1.0
+        else sorted(legacy_rng.sample(candidates, n), key=lambda x: x[0])
     )
+    selected_non_train[split] = chosen
+
+if args.val_only:
+    validation_recordings = selected_non_train.get("val")
+    if not validation_recordings:
+        parser.error("The dataset release contains no eligible validation recordings")
+    validation_files = [
+        files[name]
+        for _, files in validation_recordings
+        for name in KEEP_FILES
+    ]
+    print(
+        f"val: {len(validation_recordings)}/{len(eligible['val'])} recordings "
+        "selected"
+    )
+    print(f"Downloading validation data to: {save_dir}")
+    snapshot_download(
+        repo_id=REPO_ID,
+        repo_type=REPO_TYPE,
+        allow_patterns=validation_files,
+        local_dir=str(save_dir),
+    )
+    print("Validation download completed.")
+    raise SystemExit(0)
 
 train_candidates = sorted(eligible.get("train", []), key=lambda x: x[0])
 train_by_driver = defaultdict(list)
@@ -141,9 +185,14 @@ for split in sorted(eligible):
     if split == "train":
         chosen = sorted(selected_train, key=lambda x: x[0])
     else:
-        chosen = previous_selection[split]
+        chosen = selected_non_train[split]
 
     print(f"{split}: {len(chosen)} recordings selected")
+    if split == "val":
+        print(
+            f"  Official validation coverage: "
+            f"{len(chosen)}/{len(eligible[split])} recordings"
+        )
 
     for recording_dir, files in chosen:
         print(f"  Selected: {recording_dir}")

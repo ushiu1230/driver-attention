@@ -1,3 +1,5 @@
+import hashlib
+import json
 from functools import lru_cache
 from pathlib import Path
 
@@ -181,68 +183,104 @@ class DG360LiteDataset(Dataset):
         )
 
     def _make_paths(self):
-        # Discover recording directories robustly, regardless of nesting depth.
+        """Find iteration-level recordings under driver/session directories."""
+        if not self.root.is_dir():
+            raise NotADirectoryError(f"Dataset root is not a directory: {self.root}")
+
         paths = []
-        for csv_path in self.root.rglob("sim_gaze_df.csv"):
-            rec_dir = csv_path.parent
-            if (rec_dir / "rgb").is_dir() and (rec_dir / "saliency").is_dir():
-                paths.append(rec_dir)
-        return sorted(set(paths))
+        driver_dirs = sorted(path for path in self.root.iterdir() if path.is_dir())
+        for driver_dir in driver_dirs:
+            session_dirs = sorted(path for path in driver_dir.iterdir() if path.is_dir())
+            for session_dir in session_dirs:
+                recording_dirs = sorted(
+                    path for path in session_dir.iterdir() if path.is_dir()
+                )
+                paths.extend(recording_dirs)
+        return paths
 
     @staticmethod
     def _jpg_stems(folder):
-        return sorted(
+        stems = [
             p.stem for p in folder.iterdir()
             if p.is_file() and p.suffix.lower() in {".jpg", ".jpeg"}
+        ]
+        return sorted(
+            stems,
+            key=lambda stem: (0, int(stem)) if stem.isdecimal() else (1, stem),
         )
 
     def _check_files(self):
+        """Validate each recording and return its ordered CSV frame IDs."""
         frame_ids_by_recording = []
+        required_columns = {"Frame", "gaze_x", "gaze_y"}
+
         for rec_dir in self.data_paths:
+            rgb_dir = rec_dir / "rgb"
+            saliency_dir = rec_dir / "saliency"
             csv_path = rec_dir / "sim_gaze_df.csv"
-            meta = load_csv(str(csv_path))
-            if "Frame" not in meta.columns:
-                raise ValueError(f"CSV has no 'Frame' column: {csv_path}")
 
-            rgb_stems = self._jpg_stems(rec_dir / "rgb")
-            sal_stems = self._jpg_stems(rec_dir / "saliency")
-            n_csv = len(meta)
-            try:
-                raw_frame_ids = meta["Frame"].tolist()
-                frame_ids = [int(frame_id) for frame_id in raw_frame_ids]
-                if any(
-                    float(raw_id) != frame_id
-                    for raw_id, frame_id in zip(raw_frame_ids, frame_ids)
-                ):
-                    raise ValueError("Frame IDs must be integers")
-            except (TypeError, ValueError) as error:
-                raise ValueError(f"Invalid frame ID in {csv_path}") from error
+            missing = [
+                str(path)
+                for path in (rgb_dir, saliency_dir)
+                if not path.is_dir()
+            ]
+            if not csv_path.is_file():
+                missing.append(str(csv_path))
+            if missing:
+                raise FileNotFoundError(
+                    f"Incomplete recording {rec_dir}; missing: {', '.join(missing)}"
+                )
 
-            if len(set(frame_ids)) != n_csv:
-                raise ValueError(f"Duplicate frame IDs in {csv_path}")
-            if any(current <= previous for previous, current in zip(frame_ids, frame_ids[1:])):
-                raise ValueError(f"Frame IDs are not strictly increasing in {csv_path}")
+            metadata = load_csv(str(csv_path))
+            missing_columns = required_columns.difference(metadata.columns)
+            if missing_columns:
+                raise ValueError(
+                    f"CSV {csv_path} is missing columns: "
+                    f"{', '.join(sorted(missing_columns))}"
+                )
+            if metadata.empty:
+                raise ValueError(f"CSV contains no frame rows: {csv_path}")
+
+            raw_frame_ids = pd.to_numeric(metadata["Frame"], errors="coerce")
+            if raw_frame_ids.isna().any() or not np.isfinite(raw_frame_ids).all():
+                raise ValueError(f"CSV contains invalid Frame IDs: {csv_path}")
+            if (raw_frame_ids % 1 != 0).any() or (raw_frame_ids < 1).any():
+                raise ValueError(
+                    f"Frame IDs must be positive integers in {csv_path}"
+                )
+
+            frame_ids = raw_frame_ids.astype(np.int64).tolist()
+            if any(
+                current <= previous
+                for previous, current in zip(frame_ids, frame_ids[1:])
+            ):
+                raise ValueError(
+                    f"Frame IDs must be unique and strictly increasing in {csv_path}"
+                )
 
             expected_stems = [f"{frame_id:06d}" for frame_id in frame_ids]
-            if rgb_stems != sal_stems:
-                raise ValueError(f"RGB/saliency filenames differ in {rec_dir}")
+            rgb_stems = self._jpg_stems(rgb_dir)
+            saliency_stems = self._jpg_stems(saliency_dir)
             if rgb_stems != expected_stems:
+                missing_stems = sorted(set(expected_stems) - set(rgb_stems))
+                extra_stems = sorted(set(rgb_stems) - set(expected_stems))
                 raise ValueError(
-                    f"Frame filenames do not align with CSV Frame IDs in {rec_dir}. "
-                    f"RGB={len(rgb_stems)}, saliency={len(sal_stems)}, CSV={n_csv}. "
-                    "Check that each CSV Frame ID has matching RGB and saliency files."
+                    f"RGB filenames do not match CSV Frame IDs in {rec_dir}: "
+                    f"RGB={len(rgb_stems)}, CSV={len(expected_stems)}, "
+                    f"missing={missing_stems[:5]}, extra={extra_stems[:5]}"
+                )
+            if saliency_stems != expected_stems:
+                missing_stems = sorted(set(expected_stems) - set(saliency_stems))
+                extra_stems = sorted(set(saliency_stems) - set(expected_stems))
+                raise ValueError(
+                    f"Saliency filenames do not match CSV Frame IDs in {rec_dir}: "
+                    f"saliency={len(saliency_stems)}, CSV={len(expected_stems)}, "
+                    f"missing={missing_stems[:5]}, extra={extra_stems[:5]}"
                 )
 
             frame_ids_by_recording.append(frame_ids)
-        return frame_ids_by_recording
 
-    def _make_fixation_mask(self, gaze: pd.DataFrame, src_img_size):
-        return make_fixation_mask(
-            gaze,
-            src_img_size=src_img_size,
-            target_size=self.img_size,
-            resize_mode=self.resize_mode,
-        )
+        return frame_ids_by_recording
 
     def _make_samples(self):
         samples = []
@@ -255,15 +293,150 @@ class DG360LiteDataset(Dataset):
                 samples.append((recording_idx, start))
         return samples
 
+    def _weight_cache_paths(self, cache_dir=None):
+        """Return cache paths keyed by dataset and sample-generation settings."""
+        cache_dir = (
+            Path(cache_dir)
+            if cache_dir is not None
+            else self.root / ".sample_weight_cache"
+        )
+        records = []
+        for rec_dir, frame_ids in zip(self.data_paths, self.frame_ids):
+            csv_path = rec_dir / "sim_gaze_df.csv"
+            csv_stat = csv_path.stat()
+            saliency_stat = (rec_dir / "saliency").stat()
+            records.append(
+                {
+                    "record": str(rec_dir.resolve()),
+                    "csv_size": csv_stat.st_size,
+                    "csv_mtime_ns": csv_stat.st_mtime_ns,
+                    "saliency_dir_mtime_ns": saliency_stat.st_mtime_ns,
+                    "frames": len(frame_ids),
+                }
+            )
+        signature = {
+            "version": 1,
+            "records": records,
+            "T": self.T,
+            "stride": self.stride,
+            "clip_step": self.clip_step,
+            "skip_first": self.skip_first,
+            "target_offset": self.target_offset,
+            "img_size": self.img_size,
+            "resize_mode": self.resize_mode,
+            "sample_count": len(self.samples),
+        }
+        key = hashlib.sha256(
+            json.dumps(signature, sort_keys=True).encode("utf-8")
+        ).hexdigest()[:20]
+        return (
+            cache_dir / f"average_saliency_{key}.pt",
+            cache_dir / f"sample_kld_weights_{key}.pt",
+        )
+
+    @staticmethod
+    def _load_tensor_cache(path, expected_shape=None):
+        try:
+            value = torch.load(path, map_location="cpu", weights_only=True)
+        except (OSError, RuntimeError, EOFError, ValueError):
+            return None
+        if not isinstance(value, torch.Tensor):
+            return None
+        if expected_shape is not None and tuple(value.shape) != tuple(expected_shape):
+            return None
+        if not torch.isfinite(value).all():
+            return None
+        return value.float()
+
+    @staticmethod
+    def _save_tensor_cache(value, path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = path.with_suffix(path.suffix + ".tmp")
+        torch.save(value.cpu(), temporary_path)
+        temporary_path.replace(path)
+
+    def _target_saliency_distribution(self, sample_idx):
+        recording_idx, start = self.samples[sample_idx]
+        target_position = (
+            start + self.target_offset + (self.T - 1) * self.stride
+        )
+        target_id = self.frame_ids[recording_idx][target_position]
+        saliency = self._read(recording_idx, target_id, "saliency")
+        valid = resize_image(
+            torch.ones_like(saliency), self.img_size, self.resize_mode
+        ) > 0
+        saliency = self.gt_tf(
+            resize_image(saliency, self.img_size, self.resize_mode)
+        ).masked_fill(~valid, 0)
+        total = saliency.sum()
+        if not torch.isfinite(total) or total <= 0:
+            rec_dir = self.data_paths[recording_idx]
+            raise ValueError(
+                "Cannot calculate sample weights from an empty or invalid "
+                f"saliency target: {rec_dir}, frame {target_id:06d}"
+            )
+        return saliency / total
+
+    def get_avg_saliency(self, cache_dir=None, force_recompute=False):
+        """Compute the mean probability saliency map over training samples.
+
+        The returned tensor has shape [1, H, W] and sums to one. Use this on
+        the training dataset only; validation targets must not enter the cache.
+        """
+        average_path, _ = self._weight_cache_paths(cache_dir)
+        if not force_recompute:
+            cached = self._load_tensor_cache(
+                average_path, expected_shape=(1, *self.img_size)
+            )
+            if cached is not None and cached.sum() > 0:
+                return cached / cached.sum()
+
+        running_sum = torch.zeros((1, *self.img_size), dtype=torch.float32)
+        for sample_idx in range(len(self.samples)):
+            running_sum += self._target_saliency_distribution(sample_idx)
+        average = running_sum / len(self.samples)
+        average = average / average.sum().clamp_min(torch.finfo(average.dtype).tiny)
+        self._save_tensor_cache(average, average_path)
+        return average
+
+    def get_sample_weights(
+        self, cache_dir=None, force_recompute=False, eps=1e-8
+    ):
+        """Return per-sample KL(target || average_saliency) weights on CPU.
+
+        Weights follow ``self.samples`` order and are raw KLD values. The
+        trainer is responsible for percentile clipping and mean normalization.
+        """
+        _, weights_path = self._weight_cache_paths(cache_dir)
+        if not force_recompute:
+            cached = self._load_tensor_cache(
+                weights_path, expected_shape=(len(self.samples),)
+            )
+            if cached is not None and (cached >= 0).all():
+                return cached
+
+        average = self.get_avg_saliency(
+            cache_dir=cache_dir, force_recompute=force_recompute
+        ).flatten()
+        log_average = average.clamp_min(eps).log()
+        weights = torch.empty(len(self.samples), dtype=torch.float32)
+        for sample_idx in range(len(self.samples)):
+            target = self._target_saliency_distribution(sample_idx).flatten()
+            weights[sample_idx] = (
+                target * (target.clamp_min(eps).log() - log_average)
+            ).sum().clamp_min(0)
+
+        self._save_tensor_cache(weights, weights_path)
+        return weights
+
     def __len__(self):
         return len(self.samples)
 
     def _read(self, recording_idx, frame_id, kind):
-        image_path = (
-            self.data_paths[recording_idx]
-            / kind
-            / f"{frame_id:06d}.jpg"
-        )
+        image_dir = self.data_paths[recording_idx] / kind
+        image_path = image_dir / f"{frame_id:06d}.jpg"
+        if not image_path.is_file():
+            image_path = image_dir / f"{frame_id:06d}.jpeg"
         if not image_path.is_file():
             raise FileNotFoundError(f"Missing image: {image_path}")
 
@@ -309,7 +482,7 @@ class DG360LiteDataset(Dataset):
                 f"RGB={tuple(target_rgb_size)}, "
                 f"saliency={tuple(saliency.shape[-2:])}"
             )
-        # MỚI: mask vùng ảnh thật, tạo từ kích thước gốc
+        # mask vùng ảnh thật, tạo từ kích thước gốc
         valid = resize_image(
             torch.ones_like(saliency), self.img_size, self.resize_mode
         )
@@ -326,9 +499,11 @@ class DG360LiteDataset(Dataset):
                 f"Expected one gaze annotation for target frame {target_id} "
                 f"in {csv_path}, found {len(target_gaze)}"
             )
-        fixation = self._make_fixation_mask(
+        fixation = make_fixation_mask(
             target_gaze,
             src_img_size=target_rgb_size,
+            target_size=self.img_size,
+            resize_mode=self.resize_mode,
         )
 
         if self.augment:
@@ -350,4 +525,5 @@ class DG360LiteDataset(Dataset):
             "sal": saliency,
             "mask": mask,
             "fixation": fixation,
+            "sample_idx": torch.tensor(index, dtype=torch.long),
         }

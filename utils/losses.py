@@ -22,7 +22,9 @@ class SaliencyLoss(nn.Module):
         self.lambda_nss = lambda_nss
         self.eps = eps
 
-    def forward(self, prediction, target, mask=None, fixation=None):
+    def forward(
+        self, prediction, target, mask=None, fixation=None, sample_weights=None
+    ):
         if prediction.shape != target.shape or prediction.ndim != 4:
             raise ValueError(
                 "prediction and target must have matching [B, C, H, W] shapes"
@@ -35,6 +37,12 @@ class SaliencyLoss(nn.Module):
             raise ValueError(
                 "NSS loss requires a fixation map with the same shape as target"
             )
+
+        if sample_weights is not None:
+            if sample_weights.ndim != 1 or sample_weights.shape[0] != prediction.shape[0]:
+                raise ValueError("sample_weights must have shape [batch_size]")
+            if not torch.isfinite(sample_weights).all() or (sample_weights < 0).any():
+                raise ValueError("sample_weights must be finite and non-negative")
 
         pred = prediction.float().flatten(start_dim=1)
         gt = target.float().flatten(start_dim=1)
@@ -115,4 +123,6 @@ class SaliencyLoss(nn.Module):
             ).sum(dim=1) / fixation_count
             loss = loss - self.lambda_nss * nss
 
+        if sample_weights is not None:
+            loss = loss * sample_weights.to(device=loss.device, dtype=loss.dtype)
         return self.lambda_sal * loss.mean()

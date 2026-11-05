@@ -52,6 +52,32 @@ class Trainer:
 
         self.train_ds = self._make_dataset(args.train_path)
         self.val_ds = self._make_dataset(args.val_path, augment=False)
+        self.train_sample_weights = None
+        if args.weighted_samples:
+            raw_weights = self.train_ds.get_sample_weights(
+                cache_dir=Path(args.save_dir) / "dataset_cache"
+            )
+            if not torch.isfinite(raw_weights).all() or (raw_weights < 0).any():
+                raise ValueError("Computed KLD sample weights are invalid")
+            lower = torch.quantile(raw_weights, 0.20)
+            upper = torch.quantile(raw_weights, 0.80)
+            clipped_weights = raw_weights.clamp(min=lower, max=upper)
+            mean_weight = clipped_weights.mean()
+            if mean_weight <= torch.finfo(clipped_weights.dtype).eps:
+                print(
+                    "KLD sample weights have no usable variation; "
+                    "falling back to uniform training weights."
+                )
+                clipped_weights.fill_(1.0)
+            else:
+                clipped_weights /= mean_weight
+            self.train_sample_weights = clipped_weights.to(self.device)
+            print(
+                "KLD sample weighting enabled: "
+                f"{len(clipped_weights)} weights, clipped to "
+                f"[{lower.item():.6g}, {upper.item():.6g}] and mean-normalized."
+            )
+
         self.train_dl = DataLoader(
             self.train_ds,
             batch_size=args.batch_size,
@@ -158,6 +184,7 @@ class Trainer:
         target = batch["sal"].to(self.device, non_blocking=True).float()
         mask = batch["mask"].to(self.device, non_blocking=True) > 0
         fixation = batch["fixation"].to(self.device, non_blocking=True) > 0
+        sample_idx = batch["sample_idx"].to(self.device, non_blocking=True)
         target = target.masked_fill(~mask, 0)
         target_mass = target.flatten(1).sum(dim=1, keepdim=True)
         valid = target_mass.squeeze(1) > 0
@@ -174,6 +201,7 @@ class Trainer:
             target[valid],
             mask[valid],
             fixation[valid],
+            sample_idx[valid],
             missing_fixation_count,
         )
 
@@ -215,7 +243,14 @@ class Trainer:
         )
 
         for step, batch in enumerate(progress):
-            rgb, target, mask, fixation, missing_fixations = self._valid_samples(batch)
+            (
+                rgb,
+                target,
+                mask,
+                fixation,
+                sample_idx,
+                missing_fixations,
+            ) = self._valid_samples(batch)
             missing_fixation_count += missing_fixations
             if rgb.shape[0] == 0:
                 continue
@@ -225,11 +260,17 @@ class Trainer:
 
             with torch.set_grad_enabled(training):
                 prediction = self._predict_saliency(rgb, mask)
+                sample_weights = (
+                    self.train_sample_weights[sample_idx]
+                    if training and self.train_sample_weights is not None
+                    else None
+                )
                 loss = self.criterion(
                     prediction,
                     target,
                     mask,
                     fixation=fixation,
+                    sample_weights=sample_weights,
                 )
                 if training:
                     self.scaler.scale(
@@ -349,6 +390,7 @@ class Trainer:
             "clip_step",
             "frame_stride",
             "accumulation_steps",
+            "weighted_samples",
             "img_size",
             "resize_mode",
             "lr",
@@ -358,6 +400,7 @@ class Trainer:
         )
         legacy_setting_defaults = {
             "accumulation_steps": 1,
+            "weighted_samples": False,
             "resize_mode": "pad",
             "dropout": 0.0,
             "augment": False,

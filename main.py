@@ -19,12 +19,12 @@ def parse_args(argv=None):
     parser.add_argument(
         "--train-path",
         required=True,
-        help="Curated training recordings (use the paper's Town 2,3,4,7,10,11 split)",
+        help="Root of the training recordings (e.g. downloaded dataset/train)",
     )
     parser.add_argument(
         "--val-path",
         required=True,
-        help="Curated validation recordings (use the paper's Town 1,5,6 split)",
+        help="Root of the validation recordings (e.g. downloaded dataset/val)",
     )
     parser.add_argument("--num-epochs", type=int, default=20)
     parser.add_argument("--batch-size", type=int, default=4)
@@ -62,6 +62,11 @@ def parse_args(argv=None):
     parser.set_defaults(augment=False)
     parser.add_argument("--no-pretrained", action="store_true")
     parser.add_argument("--use-amp", action="store_true")
+    parser.add_argument(
+        "--weighted-samples",
+        action="store_true",
+        help="Weight training samples by clipped KL divergence from mean train saliency",
+    )
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--ckpt", default="")
     parser.add_argument(
