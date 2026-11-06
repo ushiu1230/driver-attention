@@ -69,7 +69,7 @@ def build_model(args) -> nn.Module:
         pretrained=not args.no_pretrained,
         decoder_width=args.decoder_width,
         dropout=args.dropout,
-        apply_sigmoid=False,
+        apply_sigmoid=True,
     )
     print(f"Using DriverGazeNet experiment: {args.experiment}")
     print_model_info(model)

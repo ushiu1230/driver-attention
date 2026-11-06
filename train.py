@@ -43,6 +43,7 @@ class Trainer:
         self.epochs_run = 0
         self.best_val_loss = float("inf")
         self.epochs_without_improvement = 0
+        self.optimizer_updates = 0
 
         self.logger = TFLogger(run_id, args.save_dir, args=args)
         if args.use_amp and not self.use_amp:
@@ -50,7 +51,7 @@ class Trainer:
         if self.use_amp:
             print(f"Using AMP on {self.device}")
 
-        self.train_ds = self._make_dataset(args.train_path)
+        self.train_ds = self._make_dataset(args.train_path, augment=args.augment)
         self.val_ds = self._make_dataset(args.val_path, augment=False)
         self.train_sample_weights = None
         if args.weighted_samples:
@@ -94,12 +95,28 @@ class Trainer:
         )
 
         self.model = build_model(args).to(self.device)
+        feature_blocks = self.model.backbone.features
+        frozen_stages = int(getattr(args, "freeze_backbone_stages", 0))
+        if getattr(args, "freeze_backbone", False):
+            frozen_stages = len(feature_blocks)
+        if frozen_stages < 0 or frozen_stages > len(feature_blocks):
+            raise ValueError(f"freeze_backbone_stages must be between 0 and {len(feature_blocks)}")
+        self.frozen_backbone_stages = frozen_stages
+        for block in feature_blocks[:frozen_stages]:
+            block.requires_grad_(False)
+        if frozen_stages:
+            print(f"Frozen first {frozen_stages}/{len(feature_blocks)} backbone blocks, including BatchNorm statistics.")
 
+        backbone_lr_scale = float(getattr(args, "backbone_lr_scale", 1.0))
+        if backbone_lr_scale == 1.0:
+            parameter_groups = [{"params": list(self.model.parameters()), "lr": args.lr, "name": "all"}]
+        else:
+            parameter_groups = [
+                {"params": list(self.model.backbone.parameters()), "lr": args.lr * backbone_lr_scale, "name": "backbone"},
+                {"params": [p for name, p in self.model.named_parameters() if not name.startswith("backbone.")], "lr": args.lr, "name": "temporal_pool_decoder"},
+            ]
         self.optimizer = torch.optim.AdamW(
-            self.model.parameters(),
-            lr=args.lr,
-            betas=(0.9, 0.999),
-            weight_decay=args.weight_decay,
+            parameter_groups, betas=(0.9, 0.999), weight_decay=args.weight_decay
         )
         if args.init_weights:
             self.initialize_weights(args.init_weights)
@@ -110,6 +127,7 @@ class Trainer:
             lambda_mse=args.w_mse,
             lambda_nss=args.w_nss,
             lambda_sal=args.w_sal,
+            profile=getattr(args, "loss_profile", "project"),
         )
         self.metrics = SaliencyMetrics()
 
@@ -124,6 +142,9 @@ class Trainer:
             f"| batch={args.batch_size} x accumulation={args.accumulation_steps} "
             f"(effective batch={args.batch_size * args.accumulation_steps})"
         )
+        if self.frozen_backbone_stages:
+            trainable = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+            print(f"Trainable parameters after freezing: {trainable:,}")
 
     def initialize_weights(self, checkpoint_path):
         path = Path(checkpoint_path)
@@ -142,9 +163,12 @@ class Trainer:
                 f"{checkpoint.get('experiment')!r} does not match the current "
                 f"experiment {self.experiment!r}."
             )
-        if checkpoint.get("output") != "spatial_softmax":
-            raise ValueError(
-                "Initialization checkpoint must use spatial-softmax output."
+        source_output = checkpoint.get("output", "legacy/unspecified")
+        if source_output != "sigmoid":
+            print(
+                f"Initializing sigmoid-output model from checkpoint marked "
+                f"{source_output}; weights load, but prediction calibration "
+                "changes."
             )
         self.model.load_checkpoint_weights(checkpoint["model"])
         print(
@@ -163,6 +187,7 @@ class Trainer:
             target_offset=self.experiment_config["target_offset"],
             augment=augment,
             resize_mode=self.args.resize_mode,
+            paper_protocol=getattr(self.args, "paper_protocol", False),
         )
 
     def _predict_saliency(self, rgb, mask):
@@ -174,10 +199,7 @@ class Trainer:
         valid = mask > 0
         if not valid.flatten(1).any(dim=1).all():
             raise ValueError("A batch item has no valid image pixels")
-        logits = prediction.float().flatten(start_dim=2)
-        logits = logits.masked_fill(~valid.flatten(start_dim=2), float("-inf"))
-        probabilities = torch.softmax(logits, dim=-1).view_as(prediction)
-        return probabilities.masked_fill(~valid, 0.0)
+        return prediction.float().masked_fill(~valid, 0.0)
 
     def _valid_samples(self, batch):
         rgb = batch["rgb"].to(self.device, non_blocking=True)
@@ -187,14 +209,17 @@ class Trainer:
         sample_idx = batch["sample_idx"].to(self.device, non_blocking=True)
         target = target.masked_fill(~mask, 0)
         target_mass = target.flatten(1).sum(dim=1, keepdim=True)
-        valid = target_mass.squeeze(1) > 0
+        valid_target = target_mass.squeeze(1) > 0
+        self._last_filter_counts = {"empty_saliency": int((~valid_target).sum().item())}
+        valid = valid_target.clone()
         target = target / target_mass.clamp_min(torch.finfo(target.dtype).tiny).view(
             -1, 1, 1, 1
         )
         missing_fixation_count = 0
-        if self.args.w_nss:
+        missing_target_count = 0
+        if self.args.w_nss or getattr(self.args, "paper_protocol", False):
             has_fixation = fixation.flatten(1).any(dim=1)
-            missing_fixation_count = int((valid & ~has_fixation).sum().item())
+            missing_fixation_count = int((valid_target & ~has_fixation).sum().item())
             valid &= has_fixation
         return (
             rgb[valid],
@@ -219,9 +244,17 @@ class Trainer:
         self.scaler.step(self.optimizer)
         self.scaler.update()
         self.optimizer.zero_grad(set_to_none=True)
+        self.optimizer_updates += 1
+
+    def _set_model_mode(self, training):
+        self.model.train(training)
+        frozen_stages = getattr(self, "frozen_backbone_stages", 0)
+        if frozen_stages:
+            for block in self.model.backbone.features[:frozen_stages]:
+                block.eval()
 
     def _run_epoch(self, epoch, training):
-        self.model.train(training)
+        self._set_model_mode(training)
         loader = self.train_dl if training else self.val_dl
         phase = "train" if training else "val"
         loss_total = 0.0
@@ -233,6 +266,7 @@ class Trainer:
         }
         metric_counts = {name: 0 for name in metric_totals}
         sample_count = 0
+        missing_target_count = 0
         missing_fixation_count = 0
         accumulated_micro_batches = 0
         progress = tqdm(
@@ -252,6 +286,7 @@ class Trainer:
                 missing_fixations,
             ) = self._valid_samples(batch)
             missing_fixation_count += missing_fixations
+            missing_target_count += self._last_filter_counts["empty_saliency"]
             if rgb.shape[0] == 0:
                 continue
 
@@ -316,8 +351,12 @@ class Trainer:
             )
         if missing_fixation_count:
             print(
-                f"{phase}: skipped {missing_fixation_count} samples without "
-                "a valid target-frame fixation for NSS"
+                f"{phase}: excluded {missing_fixation_count} samples without fixation"
+            )
+        if getattr(self.args, "paper_protocol", False):
+            print(
+                f"{phase}: retained {sample_count}/{len(loader.dataset)} samples; "
+                f"empty saliency={missing_target_count}, empty fixation={missing_fixation_count}"
             )
 
         mean_loss = loss_total / sample_count
@@ -341,10 +380,11 @@ class Trainer:
             "epoch": epoch,
             "best_val_loss": self.best_val_loss,
             "epochs_without_improvement": self.epochs_without_improvement,
+            "optimizer_updates": self.optimizer_updates,
             "val_loss": val_loss,
             "val_metrics": val_metrics,
             "experiment": self.experiment,
-            "output": "spatial_softmax",
+            "output": "sigmoid",
             "decoder_norm": "bn",
             "args": vars(self.args),
         }
@@ -390,6 +430,8 @@ class Trainer:
             "clip_step",
             "frame_stride",
             "accumulation_steps",
+            "paper_protocol",
+            "loss_profile",
             "weighted_samples",
             "img_size",
             "resize_mode",
@@ -397,6 +439,9 @@ class Trainer:
             "weight_decay",
             "dropout",
             "augment",
+            "freeze_backbone",
+            "freeze_backbone_stages",
+            "backbone_lr_scale",
         )
         legacy_setting_defaults = {
             "accumulation_steps": 1,
@@ -404,6 +449,11 @@ class Trainer:
             "resize_mode": "pad",
             "dropout": 0.0,
             "augment": False,
+            "freeze_backbone": False,
+            "paper_protocol": False,
+            "loss_profile": "project",
+            "freeze_backbone_stages": 0,
+            "backbone_lr_scale": 1.0,
         }
         changed_settings = [
             f"{name}: checkpoint="
@@ -439,7 +489,7 @@ class Trainer:
                 f"{saved_early_stopping_patience} to "
                 f"{self.args.early_stopping_patience} epochs."
             )
-        if checkpoint.get("output", "sigmoid") != "spatial_softmax":
+        if checkpoint.get("output", "sigmoid") != "sigmoid":
             raise ValueError(
                 "Cannot resume a checkpoint trained with a different output "
                 "activation. Start a new run."
@@ -448,7 +498,7 @@ class Trainer:
         self.model.load_checkpoint_weights(checkpoint["model"])
         optimizer_state = checkpoint["optimizer"]
         temporal_pe_key = "temporal_pe.temporal_pe"
-        if temporal_pe_key not in checkpoint["model"]:
+        if temporal_pe_key in checkpoint["model"]:
             optimizer_state = optimizer_state.copy()
             optimizer_state["param_groups"] = [
                 {**group, "params": list(group["params"])}
@@ -461,7 +511,7 @@ class Trainer:
                     "parameter groups do not match the current model."
                 )
             group_deltas = [
-                len(current["params"]) - len(saved["params"])
+                len(saved["params"]) - len(current["params"])
                 for saved, current in zip(
                     optimizer_state["param_groups"], current_groups
                 )
@@ -474,37 +524,21 @@ class Trainer:
                     "parameter layout does not match the current model."
                 )
             pe_group_index = group_deltas.index(1)
-            if (
-                self.optimizer.param_groups[pe_group_index]["params"][
-                    sum(1 for _ in self.model.backbone.parameters())
-                ]
-                is not self.model.temporal_pe.temporal_pe
-            ):
+            pe_index = sum(1 for _ in self.model.backbone.parameters())
+            if pe_group_index != 0 or len(optimizer_state["param_groups"]) != 1:
                 raise ValueError(
-                    "Cannot resume this pre-PE checkpoint because the temporal "
-                    "PE parameter ordering is incompatible."
+                    "Cannot safely migrate optimizer state for this legacy PE checkpoint."
                 )
-            saved_ids = [
-                parameter_id
-                for group in optimizer_state["param_groups"]
-                for parameter_id in group["params"]
-            ]
-            optimizer_state["param_groups"][pe_group_index]["params"].insert(
-                sum(1 for _ in self.model.backbone.parameters()),
-                max(saved_ids, default=-1) + 1,
-            )
-            print(
-                "Checkpoint predates temporal PE; resuming with zero PE and "
-                "preserving the saved optimizer state for existing parameters."
-            )
+            pe_parameter_id = optimizer_state["param_groups"][0]["params"].pop(pe_index)
+            optimizer_state["state"].pop(pe_parameter_id, None)
+            print("Removed legacy PE weights and optimizer state while resuming.")
         checkpoint_lrs = [
             float(group["lr"])
             for group in optimizer_state["param_groups"]
             if "lr" in group
         ]
-        if len(checkpoint_lrs) != len(optimizer_state["param_groups"]) or any(
-            saved_lr != float(self.args.lr) for saved_lr in checkpoint_lrs
-        ):
+        expected_lrs = [float(group["lr"]) for group in self.optimizer.param_groups]
+        if checkpoint_lrs != expected_lrs:
             raise ValueError(
                 "Cannot resume a checkpoint whose optimizer learning rate is "
                 "not the configured fixed learning rate. Start a new run."
@@ -517,6 +551,7 @@ class Trainer:
         self.epochs_without_improvement = int(
             checkpoint.get("epochs_without_improvement", 0)
         )
+        self.optimizer_updates = int(checkpoint.get("optimizer_updates", 0))
 
     def train(self):
         try:

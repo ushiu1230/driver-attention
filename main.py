@@ -1,4 +1,5 @@
 import argparse
+import json
 from datetime import datetime
 from pathlib import Path
 
@@ -37,6 +38,10 @@ def parse_args(argv=None):
     parser.add_argument("--w-cc", type=float, default=1.0)
     parser.add_argument("--w-mse", type=float, default=0.0)
     parser.add_argument("--w-nss", type=float, default=0.0)
+    parser.add_argument(
+        "--loss-profile", choices=("project", "drivergaze360"), default="project",
+        help="Use the project objective or the saliency equations in the local paper source",
+    )
     parser.add_argument("--grad-clip", type=float, default=0.0)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument(
@@ -45,6 +50,10 @@ def parse_args(argv=None):
     )
     parser.add_argument("--frame-stride", type=int, default=1)
     parser.add_argument("--skip-first", type=int, default=30)
+    parser.add_argument(
+        "--paper-protocol", action="store_true",
+        help="Use source end-exclusive clip sampling and clip-plus-future fixation filtering",
+    )
     parser.add_argument("--img-size", type=int, nargs=2, default=(224, 1120))
     parser.add_argument(
         "--resize-mode",
@@ -59,8 +68,24 @@ def parse_args(argv=None):
     )
     parser.add_argument("--decoder-width", type=int, default=128)
     parser.add_argument("--dropout", type=float, default=0.0)
-    parser.set_defaults(augment=False)
+    parser.add_argument(
+        "--augment",
+        action="store_true",
+        help="Enable horizontal flip and mild color jitter on training clips",
+    )
     parser.add_argument("--no-pretrained", action="store_true")
+    parser.add_argument(
+        "--freeze-backbone", action="store_true",
+        help="Freeze backbone weights and BatchNorm statistics; train pooling and decoder",
+    )
+    parser.add_argument(
+        "--freeze-backbone-stages", type=int, default=0,
+        help="Freeze this many early backbone feature blocks and their BatchNorm statistics",
+    )
+    parser.add_argument(
+        "--backbone-lr-scale", type=float, default=1.0,
+        help="Backbone LR multiplier; 0.1 gives discriminative LR relative to the head",
+    )
     parser.add_argument("--use-amp", action="store_true")
     parser.add_argument(
         "--weighted-samples",
@@ -68,6 +93,7 @@ def parse_args(argv=None):
         help="Weight training samples by clipped KL divergence from mean train saliency",
     )
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--eval-only", action="store_true", help="Evaluate init-weights on validation and exit")
     parser.add_argument("--ckpt", default="")
     parser.add_argument(
         "--init-weights",
@@ -91,6 +117,8 @@ def main(argv=None):
         raise ValueError("--accumulation-steps must be positive")
     if args.num_workers < 0:
         raise ValueError("--num-workers must be non-negative")
+    if args.freeze_backbone_stages < 0 or args.backbone_lr_scale <= 0:
+        raise ValueError("freeze stages must be non-negative and backbone LR scale positive")
     if args.early_stopping_patience < 1:
         raise ValueError("--early-stopping-patience must be positive")
     if args.resume and args.init_weights:
@@ -126,6 +154,25 @@ def main(argv=None):
     run_id = args.name or datetime.now().strftime("%Y%m%d-%H%M%S")
     Path(args.save_dir).mkdir(parents=True, exist_ok=True)
     trainer = Trainer(run_id, args)
+    if args.eval_only:
+        if not args.init_weights:
+            raise ValueError("--eval-only requires --init-weights")
+        val_loss, metrics = trainer._run_epoch(0, training=False)
+        result = {
+            "run": run_id,
+            "checkpoint": args.init_weights,
+            "val_loss": val_loss,
+            "metrics": metrics,
+            "sample_count": len(trainer.val_ds),
+            "paper_protocol": args.paper_protocol,
+            "loss_profile": args.loss_profile,
+        }
+        output = Path(args.save_dir) / run_id / "evaluation.json"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(result, indent=2), encoding="utf-8")
+        print(json.dumps(result, indent=2), flush=True)
+        trainer.logger.close()
+        return
     trainer.train()
 
 

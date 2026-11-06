@@ -94,6 +94,15 @@ def make_fixation_mask(gaze, src_img_size, target_size, resize_mode="stretch"):
     return fixation_mask
 
 
+def paper_fixation_frame_ids(frame_ids, start, T, stride=1, target_offset=0):
+    """Return the source protocol's input and following-clip gaze frame IDs."""
+    positions = [
+        start + target_offset + i * stride for i in range(2 * T)
+        if start + target_offset + i * stride < len(frame_ids)
+    ]
+    return [frame_ids[position] for position in positions]
+
+
 @lru_cache(maxsize=128)
 def load_csv(csv_path: str) -> pd.DataFrame:
     """Cache metadata by CSV path (rather than by recording directory)."""
@@ -128,6 +137,7 @@ class DG360LiteDataset(Dataset):
         target_offset=0,
         augment=False,
         resize_mode="stretch",
+        paper_protocol=False,
     ):
         self.root = Path(root)
         self.T = int(T)
@@ -138,6 +148,7 @@ class DG360LiteDataset(Dataset):
         self.target_offset = int(target_offset)
         self.augment = bool(augment)
         self.resize_mode = resize_mode
+        self.paper_protocol = bool(paper_protocol)
 
         if self.T < 1 or self.stride < 1 or self.clip_step < 1:
             raise ValueError("T, frame_stride, and clip_step must be positive integers")
@@ -158,6 +169,13 @@ class DG360LiteDataset(Dataset):
             )
 
         self.frame_ids = self._check_files()
+        if self.paper_protocol:
+            for rec_dir, ids in zip(self.data_paths, self.frame_ids):
+                if any(b != a + 1 for a, b in zip(ids, ids[1:])):
+                    raise ValueError(
+                        "The local paper indexes frames as contiguous positions; "
+                        f"non-contiguous frame IDs found in {rec_dir}."
+                    )
         self.data_len = [len(frame_ids) for frame_ids in self.frame_ids]
         self.samples = self._make_samples()
         if not self.samples:
@@ -285,6 +303,12 @@ class DG360LiteDataset(Dataset):
     def _make_samples(self):
         samples = []
         for recording_idx, n_frames in enumerate(self.data_len):
+            if self.paper_protocol:
+                # Match the local paper source: range(30, N - T*stride, step).
+                upper = n_frames - self.T * self.stride
+                for start in range(self.skip_first, upper, self.clip_step):
+                    samples.append((recording_idx, start))
+                continue
             # Largest valid start index, inclusive.
             last_start = (
                 n_frames - 1 - self.target_offset - (self.T - 1) * self.stride
@@ -493,18 +517,24 @@ class DG360LiteDataset(Dataset):
 
         csv_path = self.data_paths[recording_idx] / "sim_gaze_df.csv"
         metadata = load_csv(str(csv_path))
-        target_gaze = metadata.loc[metadata["Frame"] == target_id]
-        if len(target_gaze) != 1:
-            raise ValueError(
-                f"Expected one gaze annotation for target frame {target_id} "
-                f"in {csv_path}, found {len(target_gaze)}"
+        if self.paper_protocol:
+            fixation_ids = set(paper_fixation_frame_ids(
+                self.frame_ids[recording_idx], start, self.T, self.stride,
+                self.target_offset,
+            ))
+            fixation_gaze = metadata.loc[metadata["Frame"].isin(fixation_ids)]
+        else:
+            fixation_gaze = metadata.loc[metadata["Frame"] == target_id]
+        if fixation_gaze.empty:
+            # The source trainer filters empty fixation maps before loss.
+            fixation = torch.zeros((1, *self.img_size), dtype=torch.float32)
+        else:
+            fixation = make_fixation_mask(
+                fixation_gaze,
+                src_img_size=target_rgb_size,
+                target_size=self.img_size,
+                resize_mode=self.resize_mode,
             )
-        fixation = make_fixation_mask(
-            target_gaze,
-            src_img_size=target_rgb_size,
-            target_size=self.img_size,
-            resize_mode=self.resize_mode,
-        )
 
         if self.augment:
             if torch.rand(()) < 0.5:

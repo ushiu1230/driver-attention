@@ -1,3 +1,7 @@
+# Active E0–E2 and mirror ROI protocol
+
+See [docs/UNIFIED_PROTOCOL.md](docs/UNIFIED_PROTOCOL.md) for the controlled training, reviewed ROI contract, manual CLI, cleanup and limitations. Architecture-comparison material below is historical context; the active scope is fixed-architecture training strategies plus mirror-ROI detection.
+
 # Driver Attention Saliency
 
 The project has one active training pipeline: `main.py` parses the training
@@ -12,7 +16,7 @@ dataset/
   dataset.py            Clip loading, preprocessing and valid-pixel mask
   audit_drivergaze360.py  Dataset validation
 models/
-  drivergaze_net.py     MobileNet encoder, TSM, temporal PE and pooling
+  drivergaze_net.py     MobileNet encoder, TSM and temporal pooling
   model_factory.py      Model and experiment configuration
   saliency_decoder.py   Multi-scale saliency decoder
 legacy/
@@ -82,8 +86,25 @@ Training uses consecutive input frames (`--frame-stride 1`) and defaults to a
 defaults to direct stretching to `224 x 1120` (`--resize-mode stretch`) for
 the paper-style panorama geometry; use `--resize-mode pad` to preserve aspect
 ratio instead. Training augmentation (horizontal flip and mild color jitter)
-is not used in the paper-alignment training CLI; decoder dropout defaults to
-`0.0` and can be set with `--dropout`.
+is disabled by default and can be enabled for an ablation with `--augment`; it
+applies only to training clips. Decoder dropout defaults to `0.0` and can be
+set with `--dropout`.
+
+Example augmentation ablation (keep all other settings and the split fixed):
+
+```powershell
+python main.py --experiment tsm_attn_pool --name tsm-attn-aug-seed123 `
+  --train-path .\data\raw\drivergaze360\trainval\dataset\train `
+  --val-path .\data\raw\drivergaze360\trainval\dataset\val `
+  --num-epochs 20 --batch-size 1 --accumulation-steps 4 --num-workers 2 `
+  --lr 1e-4 --weight-decay 1e-2 --clip-step 16 --resize-mode stretch `
+  --seed 123 --use-amp --augment
+```
+
+Compare it with an otherwise identical run without `--augment`. Use the same
+split and report validation loss together with KLD, CC, SIM, and NSS; lower
+validation loss alone does not establish generalization to unseen drivers
+because the current split shares some drivers between train and validation.
 
 ### Controlled architecture comparisons
 
@@ -91,7 +112,7 @@ When comparing temporal architectures, keep the train/validation/test
 recording split and split manifests, 16 input frames, `target_offset=0`,
 saliency target, valid-pixel mask, direct resize and normalization,
 augmentation policy, loss weights, evaluation metrics, and training budget
-fixed. The active objective is spatial softmax with `KLD - CC`; validation
+fixed. The decoder uses sigmoid saliency output with `KLD + (1 - CC)`; validation
 reports KLD, CC, SIM, and NSS. Keep batch size or effective batch size
 (`batch-size * accumulation-steps`), epoch
 limit, early-stopping patience, and seed fixed as well. The learning rate is
@@ -103,10 +124,18 @@ For internal ablations, compare `temporal_attn_pool` with
 `temporal_mean_pool` with `temporal_attn_pool` to isolate attention versus
 mean pooling without TSM. These contrasts use the existing 16-frame
 experiments; they do not measure an interaction between TSM and pooling.
-The pooled variants also use a learnable temporal PE on the deepest feature
-map, before temporal aggregation. Older checkpoints without PE weights load
-with a zero PE for compatibility; retrain or fine-tune them before evaluating
-the effect of learned PE.
+The temporal models now use TSM and temporal pooling without a positional
+encoding. Legacy checkpoints containing temporal PE weights remain loadable;
+the unused PE tensor is ignored by the current architecture.
+
+For the E1/E2 source-compatible training comparison, `--paper-protocol` uses
+the author's end-exclusive clip starts and filters samples without saliency or
+fixation. `--loss-profile drivergaze360` uses the source KLD and `1 - CC`
+saliency objective; the default weights keep MSE/NSS disabled, and the
+segmentation term is omitted because this model has no segmentation head.
+`--freeze-backbone-stages 12` freezes early MobileNet feature blocks and their
+BatchNorm statistics. `--backbone-lr-scale 0.1` applies one tenth of the main
+learning rate to the backbone.
 Treat `baseline` as a separate single-frame reference, not as a controlled
 16-frame architecture ablation.
 
@@ -149,9 +178,9 @@ CPU runs do not report CUDA memory. Record GPU/CPU, PyTorch/CUDA versions,
 precision, input shape, batch size, warm-up, and repetitions with any
 published efficiency result.
 
-The decoder produces logits that the trainer converts to a spatial softmax
-over valid pixels. Saliency targets are normalized over valid pixels to form
-probability distributions. The default objective is `1 * (1 * KLD - 1 * CC)`, with weights
+The decoder applies sigmoid to its output. Saliency targets are normalized
+over valid pixels to form probability distributions inside KLD. The default
+objective is `1 * KLD + 1 * (1 - CC)`, with weights
 `--w-sal 1 --w-kld 1 --w-cc 1 --w-mse 0 --w-nss 0`; weights can be changed
 through the CLI. CC measures spatial correlation. Masked MSE is available as
 an optional term with `--w-mse`. The NSS loss term is optional (`--w-nss`); gaze
@@ -214,15 +243,16 @@ Checkpoints and TensorBoard logs are written to
 `checkpoints/<run-name>/`; both `best.pt` and `last.pt` are saved.
 Use `--init-weights <checkpoint>` to start a new run from compatible model
 weights only; this does not restore optimizer, epoch, or early-stopping state.
-The checkpoint experiment and spatial-softmax output must match. This option
-cannot be combined with `--resume`.
+The checkpoint experiment must match. Legacy checkpoints trained with a
+different output activation can initialize the model weights, but their
+prediction calibration changes. This option cannot be combined with `--resume`.
 Resume with `--resume --ckpt <path-to-last.pt>`. Resume restores model,
 optimizer, scaler, and early-stopping state and requires the same
 loss weights and model/data settings as the checkpoint. Early-stopping
-patience may be increased, but not decreased, when extending a run. A
-pre-PE checkpoint loads with a zero temporal PE and preserves its optimizer
-state for all existing parameters; the PE can then learn during resumed
-training. Back up the checkpoint before resuming because `last.pt` is
+patience may be increased, but not decreased, when extending a run. Legacy PE
+checkpoint weights are discarded when loading into the current architecture.
+Resume migration is supported for the original single-parameter-group
+optimizer layout. Back up the checkpoint before resuming because `last.pt` is
 overwritten. To train with a different objective, start a new run name rather
 than silently changing the loss mid-run. For inference, either provide a target frame from an extracted
 recording, or provide a video / folder containing RGB frames. Temporal models

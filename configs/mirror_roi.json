@@ -1,0 +1,17 @@
+{
+  "confirmed": true,
+  "review_note": "Reviewed operational study ROI: first and fifth full-height camera panels in 6400x720 panorama. Supplied C010 frames 1360/2003 and C003 frame 4067 plus 18 preview frames across six validation records were reviewed. Semantic camera order is inferred from author setup and image context; NOT author-supplied exact pixel annotation or externally verified extrinsics.",
+  "review_type": "operational_camera_panel_roi",
+  "review_evidence": "results/mirror_roi_identification/ROI_DEFINITION.md",
+  "coordinate_convention": "x/W, y/H; zero-based source pixels; polygon boundary included",
+  "candidate_centers_pixels": [[38, 486], [6361, 486]],
+  "candidate_reference_size": [6400, 720],
+  "reference_image_size": [6400, 720],
+  "roi_definition": "Union of complete rear-view camera panels, not a blind-spot mask or a radius around gaze points.",
+  "mapping_status": "inferred_camera_panel_order",
+  "source": "https://arxiv.org/html/2512.14266v3#S3.SS1",
+  "polygons": [
+    [[0.0, 0.0], [0.2, 0.0], [0.2, 1.0], [0.0, 1.0]],
+    [[0.8, 0.0], [1.0, 0.0], [1.0, 1.0], [0.8, 1.0]]
+  ]
+}
