@@ -44,6 +44,10 @@ def parse_args(argv=None):
     )
     parser.add_argument("--grad-clip", type=float, default=0.0)
     parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument("--storage", choices=("images", "video"), default="images",
+                        help="Read extracted JPGs or decode local MP4 files on demand")
+    parser.add_argument("--prefetch-factor", type=int, default=1,
+                        help="Batches prepared per worker when num-workers > 0")
     parser.add_argument(
         "--clip-step", "--overlap", dest="clip_step", type=int, default=16,
         help="Step between sampled clips; smaller values overlap more",
@@ -117,6 +121,8 @@ def main(argv=None):
         raise ValueError("--accumulation-steps must be positive")
     if args.num_workers < 0:
         raise ValueError("--num-workers must be non-negative")
+    if args.prefetch_factor < 1:
+        raise ValueError("--prefetch-factor must be positive")
     if args.freeze_backbone_stages < 0 or args.backbone_lr_scale <= 0:
         raise ValueError("freeze stages must be non-negative and backbone LR scale positive")
     if args.early_stopping_patience < 1:

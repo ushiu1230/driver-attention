@@ -79,12 +79,24 @@ class Trainer:
                 f"[{lower.item():.6g}, {upper.item():.6g}] and mean-normalized."
             )
 
+        worker_options = {}
+        if args.num_workers > 0:
+            worker_options = {
+                "persistent_workers": True,
+                "prefetch_factor": getattr(args, "prefetch_factor", 1),
+            }
+        # Weighted-sample preparation may have opened video handles in the
+        # parent. Close before workers fork; every worker opens its own handles.
+        for dataset in (self.train_ds, self.val_ds):
+            if dataset.video_reader is not None:
+                dataset.video_reader.close()
         self.train_dl = DataLoader(
             self.train_ds,
             batch_size=args.batch_size,
             shuffle=True,
             num_workers=args.num_workers,
             pin_memory=self.device.type == "cuda",
+            **worker_options,
         )
         self.val_dl = DataLoader(
             self.val_ds,
@@ -92,6 +104,7 @@ class Trainer:
             shuffle=False,
             num_workers=args.num_workers,
             pin_memory=self.device.type == "cuda",
+            **worker_options,
         )
 
         self.model = build_model(args).to(self.device)
@@ -188,6 +201,7 @@ class Trainer:
             augment=augment,
             resize_mode=self.args.resize_mode,
             paper_protocol=getattr(self.args, "paper_protocol", False),
+            storage=getattr(self.args, "storage", "images"),
         )
 
     def _predict_saliency(self, rgb, mask):

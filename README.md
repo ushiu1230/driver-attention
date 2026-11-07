@@ -195,14 +195,31 @@ sum-normalized density).
 
 ## Dataset splits
 
-`scripts/dataset_download.py` holds out approximately 10% of eligible drivers
-from the source `train` split for a separate test directory. All recordings
-from each held-out driver go to test; remaining drivers are eligible for
-training. It downloads the complete official source `val` split by default,
-instead of the previous 20% subset. On the current Hugging Face file listing,
-that is 71 validation recordings rather than 15. Use `--val-fraction` only
-when intentionally creating a smaller quick-test subset. `--train-fraction`
-selects a reproducible subset of the remaining training recordings:
+For Colab with limited disk space, stage compressed videos locally, then
+train with `--storage video` without extracting the full JPG dataset:
+
+```bash
+python scripts/stage_colab_data.py --source /content/drive/MyDrive/drivergaze360/trainval/dataset --destination /content/dg360
+python main.py --train-path /content/dg360/train --val-path /content/dg360/val --storage video --num-workers 2 --prefetch-factor 1
+```
+
+Adjust the Drive path and add your experiment options. Staging checks free
+space with a default 160 GiB dataset budget and 20 GiB reserve, and reuses
+completed copies on rerun. Video decoding avoids the previous JPEG encoding
+step, so pixels can differ slightly; use the same storage mode for controlled
+model comparisons. Colab throughput has not yet been benchmarked.
+
+`scripts/dataset_download.py` downloads RGB, saliency, and gaze metadata for
+every selected recording. Depth (`dt.mp4`) and instance segmentation
+(`is.tar`) are intentionally excluded. It holds out exactly one eligible
+driver from source `train` who is absent from the entire source `val` split.
+Selection is reproducible (seed 42), or explicit with `--test-driver C021`
+(the ID must satisfy this condition). All recordings
+from the held-out driver go to a separate test directory; remaining drivers are eligible for
+training. It downloads every source split in full by default, including the
+complete official `val` split. Use `--val-fraction` only when intentionally
+creating a smaller quick-test subset. `--train-fraction` selects a
+reproducible subset of the remaining training recordings:
 
 ```bash
 python scripts/dataset_download.py --val-only

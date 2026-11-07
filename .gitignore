@@ -1,86 +1,43 @@
-# =====================================================
-# DATA
-# =====================================================
-data/
-drivergaze360_subset/
-*.mp4
-*.jpg
-*.jpeg
-*.png
-!results/figures/*.png
-!results/figures/*.jpg
+# Keep local artifacts out of Git by default. Only explicitly allowed project
+# files below appear in git status/add. Add an exception for new modules.
+*
 
-# =====================================================
-# MODEL CHECKPOINTS
-# =====================================================
-checkpoints/
-*.pth
-*.pt
-*.ckpt
-*.h5
-*.onnx
+# Project entry points and installation instructions
+!/.gitignore
+!/README.md
+!/requirements.txt
+!/__init__.py
+!/main.py
+!/train.py
+!/infer.py
+!/benchmark_efficiency.py
 
-# =====================================================
-# LOGS & EXPERIMENTS
-# =====================================================
-results/logs/
-wandb/
-*.log
-tensorboard/
+# Runtime modules: Python source only, without data/caches/checkpoints
+!/models/
+!/models/*.py
+!/utils/
+!/utils/*.py
+!/dataset/
+!/dataset/__init__.py
+!/dataset/dataset.py
+!/dataset/video_reader.py
 
-# =====================================================
-# PYTHON
-# =====================================================
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-dist/
-*.egg-info/
-.eggs/
+# Runtime configuration
+!/configs/
+!/configs/*.json
+!/configs/*.yaml
+!/configs/*.yml
 
-# =====================================================
-# VIRTUAL ENVIRONMENTS
-# =====================================================
-venv/
-env/
-ENV/
-.venv/
-miniconda3/
+# Download, preprocessing, training, inference and experiment management
+!/scripts/
+!/scripts/__init__.py
+!/scripts/dataset_download.py
+!/scripts/prepare_dataset.sh
+!/scripts/stage_colab_data.py
+!/scripts/run_experiment.ps1
+!/scripts/manage_checkpoints.py
+!/scripts/mirror_attention.py
+!/scripts/summarize_experiments.py
 
-# =====================================================
-# JUPYTER
-# =====================================================
-.ipynb_checkpoints/
-*.ipynb_checkpoints
-
-# =====================================================
-# IDE
-# =====================================================
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# =====================================================
-# OS
-# =====================================================
-.DS_Store
-Thumbs.db
-desktop.ini
-
-# =====================================================
-# REPORT
-# =====================================================
-report/thesis.pdf
-report/slides.pdf
-report/*.aux
-report/*.log
-report/*.out
-report/*.toc
-
-# keep nested clone out of this repo
-driver-attention/
+# Tests, audit/check/preflight tools, docs, papers, legacy code, notebooks,
+# images, videos, results, weights, logs and environments stay local.

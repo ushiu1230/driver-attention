@@ -13,14 +13,22 @@ SAVE_DIR = PROJECT_ROOT / "data" / "raw" / "drivergaze360" / "trainval"
 TEST_SAVE_DIR = PROJECT_ROOT / "data" / "raw" / "drivergaze360" / "test"
 TRAIN_FRACTION = 1.0
 VAL_FRACTION = 1.0
-TEST_DRIVER_FRACTION = 0.10
-OTHER_SPLIT_FRACTION = 0.20
 SEED = 42
 
-KEEP_FILES = {"rgb.mp4", "saliency.mp4", "sim_gaze_df.csv"}
+# Modalities used by the current RGB-to-saliency training pipeline. Depth maps
+# and instance-segmentation archives are intentionally excluded to reduce the
+# download size.
+RECORDING_FILES = (
+    "rgb.mp4",
+    "saliency.mp4",
+    "sim_gaze_df.csv",
+)
 
 parser = argparse.ArgumentParser(
-    description="Download a reproducible DriverGaze360 subset."
+    description=(
+        "Download DriverGaze360 RGB, saliency, and gaze metadata (excluding "
+        "depth and instance segmentation)."
+    )
 )
 parser.add_argument(
     "--train-fraction",
@@ -50,10 +58,11 @@ parser.add_argument(
     help=f"Separate directory for held-out test drivers (default: {TEST_SAVE_DIR}).",
 )
 parser.add_argument(
-    "--test-driver-fraction",
-    type=float,
-    default=TEST_DRIVER_FRACTION,
-    help="Fraction of original training drivers held out for test (default: 0.10).",
+    "--test-driver",
+    help=(
+        "One training driver absent from the entire source validation split "
+        "(e.g. C021). By default, choose one reproducibly with seed 42."
+    ),
 )
 parser.add_argument(
     "--val-only",
@@ -65,8 +74,6 @@ if not 0 < args.train_fraction <= 1:
     parser.error("--train-fraction must be greater than 0 and at most 1")
 if not 0 < args.val_fraction <= 1:
     parser.error("--val-fraction must be greater than 0 and at most 1")
-if not 0 < args.test_driver_fraction < 1:
-    parser.error("--test-driver-fraction must be greater than 0 and less than 1")
 save_dir = args.output_dir
 test_save_dir = args.test_output_dir
 
@@ -89,26 +96,26 @@ for path in all_files:
     if (
         len(parts) >= 6
         and parts[0] == "dataset"
-        and parts[-1] in KEEP_FILES
+        and parts[-1] in RECORDING_FILES
     ):
         split = parts[1]
         recording_dir = "/".join(parts[:-1])
         recordings[(split, recording_dir)][parts[-1]] = path
 
-# Keep only recordings containing all three requested files
+# Do not silently download partial recordings.
 eligible = defaultdict(list)
 
 for (split, recording_dir), files in recordings.items():
-    if KEEP_FILES.issubset(files.keys()):
+    if all(name in files for name in RECORDING_FILES):
         eligible[split].append((recording_dir, files))
 
-# Keep non-training split sampling deterministic. Download the complete
-# official validation split by default; other source splits remain sampled.
+# Keep optional sampling deterministic. Every source split is downloaded in
+# full by default; --val-fraction is the only opt-in reduction for validation.
 legacy_rng = random.Random(SEED)
 selected_non_train = {}
 for split in sorted(eligible):
     candidates = sorted(eligible[split], key=lambda x: x[0])
-    fraction = args.val_fraction if split == "val" else OTHER_SPLIT_FRACTION
+    fraction = args.val_fraction if split == "val" else 1.0
     n = max(1, math.ceil(len(candidates) * fraction))
     n = min(n, len(candidates))
     chosen = (
@@ -125,7 +132,7 @@ if args.val_only:
     validation_files = [
         files[name]
         for _, files in validation_recordings
-        for name in KEEP_FILES
+        for name in RECORDING_FILES
     ]
     print(
         f"val: {len(validation_recordings)}/{len(eligible['val'])} recordings "
@@ -155,11 +162,43 @@ if len(drivers) < 2:
         "At least two eligible training drivers are required to create "
         "disjoint train and test splits."
     )
-test_driver_count = min(
-    len(drivers) - 1,
-    max(1, math.ceil(len(drivers) * args.test_driver_fraction)),
-)
-test_drivers = set(random.Random(SEED).sample(drivers, test_driver_count))
+# Inspect every source validation path, even incomplete recordings and records
+# excluded by --val-fraction, so sampling cannot hide an overlapping driver.
+validation_drivers = {
+    parts[2]
+    for path in all_files
+    if len(parts := path.split("/")) >= 4
+    and parts[:2] == ["dataset", "val"]
+}
+test_candidates = sorted(set(drivers) - validation_drivers)
+if not test_candidates:
+    parser.error("No training driver is absent from the source validation split")
+if args.test_driver and args.test_driver not in test_candidates:
+    parser.error("--test-driver must be a training driver absent from validation")
+test_driver = args.test_driver or random.Random(SEED).choice(test_candidates)
+test_drivers = {test_driver}
+
+# Downloads do not remove files from earlier runs. Refuse a mixed partition
+# instead of silently leaving held-out recordings visible to the train loader.
+if save_dir.resolve() == test_save_dir.resolve():
+    parser.error("Training and test output directories must differ")
+if (save_dir / "dataset" / "train" / test_driver).exists():
+    parser.error(
+        f"Held-out driver {test_driver} already exists under {save_dir / 'dataset' / 'train'}. "
+        "Use a fresh output directory or relocate that driver's existing data first."
+    )
+existing_test_root = test_save_dir / "dataset" / "train"
+if existing_test_root.exists():
+    stale_drivers = [
+        p.name for p in existing_test_root.iterdir()
+        if p.is_dir() and p.name != test_driver
+    ]
+    if stale_drivers:
+        parser.error(
+            "Test directory contains other drivers from an earlier split: "
+            + ", ".join(sorted(stale_drivers))
+            + ". Use a fresh test output directory."
+        )
 test_recordings = [
     recording
     for driver in sorted(test_drivers)
@@ -196,12 +235,12 @@ for split in sorted(eligible):
 
     for recording_dir, files in chosen:
         print(f"  Selected: {recording_dir}")
-        selected_files.extend(files[name] for name in KEEP_FILES)
+        selected_files.extend(files[name] for name in RECORDING_FILES)
 
 test_files = [
     files[name]
     for _, files in sorted(test_recordings, key=lambda x: x[0])
-    for name in KEEP_FILES
+    for name in RECORDING_FILES
 ]
 
 if not selected_files or not test_files:
