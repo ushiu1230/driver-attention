@@ -209,6 +209,24 @@ completed copies on rerun. Video decoding avoids the previous JPEG encoding
 step, so pixels can differ slightly; use the same storage mode for controlled
 model comparisons. Colab throughput has not yet been benchmarked.
 
+If random MP4 reads starve the GPU, optionally install `decord` and compare
+CPU decoders on the same shuffled samples before training:
+
+```bash
+pip install decord
+python scripts/benchmark_video_loading.py --root /content/dg360/train --backends opencv decord --frames 1 --batch-size 4 --num-workers 2
+```
+
+To use Decord in training, add `--video-backend decord --video-threads 1`.
+It decodes RGB clips in chunks of up to four source frames with indexed batch
+access. `--video-cache-size` controls open readers per worker (default 4).
+Source resolution, CSV frame IDs, gaze mapping and sample order are preserved;
+decoder pixel conversions can differ, so keep one backend across compared
+runs. Decoder identity is included in saliency-weight cache signatures.
+This is CPU decoding; installing Decord from PyPI does not enable GPU decoding.
+The benchmark excludes model compute, reports setup separately and uses the
+same sampled IDs; repeat with reversed backend order to check OS cache effects.
+
 `scripts/dataset_download.py` downloads RGB, saliency, and gaze metadata for
 every selected recording. Depth (`dt.mp4`) and instance segmentation
 (`is.tar`) are intentionally excluded. It holds out exactly one eligible

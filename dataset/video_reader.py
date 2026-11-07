@@ -8,6 +8,8 @@ import torch
 
 class VideoReader:
     def __init__(self, max_open=4):
+        if max_open < 1:
+            raise ValueError("Video cache size must be positive")
         self.max_open = max_open
         self.pid = os.getpid()
         self.handles = OrderedDict()
@@ -54,8 +56,76 @@ class VideoReader:
         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         return torch.from_numpy(frame).permute(2, 0, 1).contiguous()
 
+    def read_many(self, path, frame_ids):
+        for frame_id in frame_ids:
+            yield self.read(path, frame_id)
+
     def __del__(self):
-        self.close()
+        if hasattr(self, "handles"):
+            self.close()
+
+
+class DecordVideoReader:
+    """CPU decoder with accurate indexed access and bounded chunk allocations.
+
+    No output resizing here: fixation mapping still uses source dimensions.
+    No global Decord bridge changes and no CUDA contexts in loader workers.
+    """
+    def __init__(self, max_open=4, num_threads=1):
+        if max_open < 1 or num_threads < 1:
+            raise ValueError("Video cache size and decoder threads must be positive")
+        try:
+            import decord  # noqa: F401
+        except ImportError as error:
+            raise ImportError("Decord backend requires: pip install decord") from error
+        self.max_open = max_open
+        self.num_threads = num_threads
+        self.pid = os.getpid()
+        self.handles = OrderedDict()
+
+    def close(self):
+        # Dropping the last reference frees Decord's native reader handle.
+        self.handles.clear()
+
+    def __getstate__(self):
+        return {"max_open": self.max_open, "num_threads": self.num_threads,
+                "pid": None, "handles": OrderedDict()}
+
+    def _reader(self, path):
+        if self.pid != os.getpid():
+            self.close()
+            self.pid = os.getpid()
+        path = str(path)
+        reader = self.handles.pop(path, None)
+        if reader is None:
+            from decord import VideoReader as Reader, cpu
+            if len(self.handles) >= self.max_open:
+                self.handles.popitem(last=False)
+            reader = Reader(path, ctx=cpu(0), num_threads=self.num_threads)
+        self.handles[path] = reader
+        return reader
+
+    def read_many(self, path, frame_ids):
+        reader = self._reader(path)
+        indices = [int(frame_id) - 1 for frame_id in frame_ids]
+        if any(index < 0 or index >= len(reader) for index in indices):
+            raise IndexError(f"Frame IDs out of video bounds: {path}")
+        # Avoid materializing all 16 panoramic source frames at once.
+        for start in range(0, len(indices), 4):
+            frames = reader.get_batch(indices[start:start + 4]).asnumpy()
+            for frame in frames:
+                yield torch.from_numpy(frame).permute(2, 0, 1).contiguous()
+
+    def read(self, path, frame_id, grayscale=False):
+        frame = next(self.read_many(path, [frame_id]))
+        if grayscale:
+            image = frame.permute(1, 2, 0).numpy()
+            return torch.from_numpy(cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)).unsqueeze(0)
+        return frame
+
+    def __del__(self):
+        if hasattr(self, "handles"):
+            self.close()
 
 
 def validate_video(path, frame_count):

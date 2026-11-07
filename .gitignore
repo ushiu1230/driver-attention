@@ -34,6 +34,7 @@
 !/scripts/dataset_download.py
 !/scripts/prepare_dataset.sh
 !/scripts/stage_colab_data.py
+!/scripts/benchmark_video_loading.py
 !/scripts/run_experiment.ps1
 !/scripts/manage_checkpoints.py
 !/scripts/mirror_attention.py

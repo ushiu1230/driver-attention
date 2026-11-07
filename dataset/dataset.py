@@ -139,6 +139,9 @@ class DG360LiteDataset(Dataset):
         resize_mode="stretch",
         paper_protocol=False,
         storage="images",
+        video_backend="opencv",
+        video_threads=1,
+        video_cache_size=4,
     ):
         self.root = Path(root)
         self.T = int(T)
@@ -154,9 +157,15 @@ class DG360LiteDataset(Dataset):
             raise ValueError("storage must be images or video")
         self.storage = storage
         self.video_reader = None
+        if video_backend not in ("opencv", "decord"):
+            raise ValueError("video_backend must be opencv or decord")
+        self.video_backend = video_backend
         if storage == "video":
-            from dataset.video_reader import VideoReader
-            self.video_reader = VideoReader()
+            from dataset.video_reader import VideoReader, DecordVideoReader
+            self.video_reader = (
+                DecordVideoReader(max_open=video_cache_size, num_threads=video_threads)
+                if video_backend == "decord" else VideoReader(max_open=video_cache_size)
+            )
 
         if self.T < 1 or self.stride < 1 or self.clip_step < 1:
             raise ValueError("T, frame_stride, and clip_step must be positive integers")
@@ -365,6 +374,7 @@ class DG360LiteDataset(Dataset):
         signature = {
             "version": 1,
             "storage": self.storage,
+            "video_backend": self.video_backend if self.storage == "video" else None,
             "records": records,
             "T": self.T,
             "stride": self.stride,
@@ -517,8 +527,13 @@ class DG360LiteDataset(Dataset):
 
         rgb_frames = []
         target_rgb_size = None
-        for frame_id in frame_ids:
-            frame = self._read(recording_idx, frame_id, "rgb")
+        source_frames = (
+            self.video_reader.read_many(
+                self.data_paths[recording_idx] / "rgb.mp4", frame_ids
+            ) if self.storage == "video" else
+            (self._read(recording_idx, frame_id, "rgb") for frame_id in frame_ids)
+        )
+        for frame in source_frames:
             target_rgb_size = frame.shape[-2:]
             frame = resize_image(frame, self.img_size, self.resize_mode)
             rgb_frames.append(frame)

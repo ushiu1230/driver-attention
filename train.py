@@ -202,6 +202,9 @@ class Trainer:
             resize_mode=self.args.resize_mode,
             paper_protocol=getattr(self.args, "paper_protocol", False),
             storage=getattr(self.args, "storage", "images"),
+            video_backend=getattr(self.args, "video_backend", "opencv"),
+            video_threads=getattr(self.args, "video_threads", 1),
+            video_cache_size=getattr(self.args, "video_cache_size", 4),
         )
 
     def _predict_saliency(self, rgb, mask):
