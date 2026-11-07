@@ -138,10 +138,6 @@ class DG360LiteDataset(Dataset):
         augment=False,
         resize_mode="stretch",
         paper_protocol=False,
-        storage="images",
-        video_backend="opencv",
-        video_threads=1,
-        video_cache_size=4,
     ):
         self.root = Path(root)
         self.T = int(T)
@@ -153,19 +149,6 @@ class DG360LiteDataset(Dataset):
         self.augment = bool(augment)
         self.resize_mode = resize_mode
         self.paper_protocol = bool(paper_protocol)
-        if storage not in ("images", "video"):
-            raise ValueError("storage must be images or video")
-        self.storage = storage
-        self.video_reader = None
-        if video_backend not in ("opencv", "decord"):
-            raise ValueError("video_backend must be opencv or decord")
-        self.video_backend = video_backend
-        if storage == "video":
-            from dataset.video_reader import VideoReader, DecordVideoReader
-            self.video_reader = (
-                DecordVideoReader(max_open=video_cache_size, num_threads=video_threads)
-                if video_backend == "decord" else VideoReader(max_open=video_cache_size)
-            )
 
         if self.T < 1 or self.stride < 1 or self.clip_step < 1:
             raise ValueError("T, frame_stride, and clip_step must be positive integers")
@@ -254,14 +237,10 @@ class DG360LiteDataset(Dataset):
             saliency_dir = rec_dir / "saliency"
             csv_path = rec_dir / "sim_gaze_df.csv"
 
-            required_paths = (
-                (rec_dir / "rgb.mp4", rec_dir / "saliency.mp4")
-                if self.storage == "video" else (rgb_dir, saliency_dir)
-            )
             missing = [
                 str(path)
-                for path in required_paths
-                if not (path.is_file() if self.storage == "video" else path.is_dir())
+                for path in (rgb_dir, saliency_dir)
+                if not path.is_dir()
             ]
             if not csv_path.is_file():
                 missing.append(str(csv_path))
@@ -298,16 +277,6 @@ class DG360LiteDataset(Dataset):
                 )
 
             expected_stems = [f"{frame_id:06d}" for frame_id in frame_ids]
-            if self.storage == "video":
-                from dataset.video_reader import validate_video
-                if frame_ids != list(range(1, len(frame_ids) + 1)):
-                    raise ValueError(
-                        f"Video mode requires contiguous CSV Frame IDs starting at 1: {csv_path}"
-                    )
-                for video in required_paths:
-                    validate_video(video, len(frame_ids))
-                frame_ids_by_recording.append(frame_ids)
-                continue
             rgb_stems = self._jpg_stems(rgb_dir)
             saliency_stems = self._jpg_stems(saliency_dir)
             if rgb_stems != expected_stems:
@@ -359,9 +328,7 @@ class DG360LiteDataset(Dataset):
         for rec_dir, frame_ids in zip(self.data_paths, self.frame_ids):
             csv_path = rec_dir / "sim_gaze_df.csv"
             csv_stat = csv_path.stat()
-            saliency_stat = (rec_dir / (
-                "saliency.mp4" if self.storage == "video" else "saliency"
-            )).stat()
+            saliency_stat = (rec_dir / "saliency").stat()
             records.append(
                 {
                     "record": str(rec_dir.resolve()),
@@ -373,8 +340,6 @@ class DG360LiteDataset(Dataset):
             )
         signature = {
             "version": 1,
-            "storage": self.storage,
-            "video_backend": self.video_backend if self.storage == "video" else None,
             "records": records,
             "T": self.T,
             "stride": self.stride,
@@ -492,11 +457,6 @@ class DG360LiteDataset(Dataset):
         return len(self.samples)
 
     def _read(self, recording_idx, frame_id, kind):
-        if self.storage == "video":
-            return self.video_reader.read(
-                self.data_paths[recording_idx] / f"{kind}.mp4",
-                frame_id, grayscale=kind == "saliency",
-            )
         image_dir = self.data_paths[recording_idx] / kind
         image_path = image_dir / f"{frame_id:06d}.jpg"
         if not image_path.is_file():
@@ -527,13 +487,8 @@ class DG360LiteDataset(Dataset):
 
         rgb_frames = []
         target_rgb_size = None
-        source_frames = (
-            self.video_reader.read_many(
-                self.data_paths[recording_idx] / "rgb.mp4", frame_ids
-            ) if self.storage == "video" else
-            (self._read(recording_idx, frame_id, "rgb") for frame_id in frame_ids)
-        )
-        for frame in source_frames:
+        for frame_id in frame_ids:
+            frame = self._read(recording_idx, frame_id, "rgb")
             target_rgb_size = frame.shape[-2:]
             frame = resize_image(frame, self.img_size, self.resize_mode)
             rgb_frames.append(frame)

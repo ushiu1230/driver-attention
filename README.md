@@ -195,37 +195,12 @@ sum-normalized density).
 
 ## Dataset splits
 
-For Colab with limited disk space, stage compressed videos locally, then
-train with `--storage video` without extracting the full JPG dataset:
-
-```bash
-python scripts/stage_colab_data.py --source /content/drive/MyDrive/drivergaze360/trainval/dataset --destination /content/dg360
-python main.py --train-path /content/dg360/train --val-path /content/dg360/val --storage video --num-workers 2 --prefetch-factor 1
-```
-
-Adjust the Drive path and add your experiment options. Staging checks free
-space with a default 160 GiB dataset budget and 20 GiB reserve, and reuses
-completed copies on rerun. Video decoding avoids the previous JPEG encoding
-step, so pixels can differ slightly; use the same storage mode for controlled
-model comparisons. Colab throughput has not yet been benchmarked.
-
-If random MP4 reads starve the GPU, optionally install `decord` and compare
-CPU decoders on the same shuffled samples before training:
-
-```bash
-pip install decord
-python scripts/benchmark_video_loading.py --root /content/dg360/train --backends opencv decord --frames 1 --batch-size 4 --num-workers 2
-```
-
-To use Decord in training, add `--video-backend decord --video-threads 1`.
-It decodes RGB clips in chunks of up to four source frames with indexed batch
-access. `--video-cache-size` controls open readers per worker (default 4).
-Source resolution, CSV frame IDs, gaze mapping and sample order are preserved;
-decoder pixel conversions can differ, so keep one backend across compared
-runs. Decoder identity is included in saliency-weight cache signatures.
-This is CPU decoding; installing Decord from PyPI does not enable GPU decoding.
-The benchmark excludes model compute, reports setup separately and uses the
-same sampled IDs; repeat with reversed backend order to check OS cache effects.
+Training reads extracted JPG/JPEG frames from each recording's `rgb/` and
+`saliency/` directories, alongside `sim_gaze_df.csv`. Extract source videos
+with `scripts/prepare_dataset.sh` before training. Resize to the configured
+`--img-size` happens in the data loader, preserving source dimensions for gaze
+mapping. Direct video training and the `--storage`/`--video-*` options have
+been removed. Worker prefetching remains available via `--prefetch-factor`.
 
 `scripts/dataset_download.py` downloads RGB, saliency, and gaze metadata for
 every selected recording. Depth (`dt.mp4`) and instance segmentation

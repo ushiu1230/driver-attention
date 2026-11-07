@@ -85,11 +85,6 @@ class Trainer:
                 "persistent_workers": True,
                 "prefetch_factor": getattr(args, "prefetch_factor", 1),
             }
-        # Weighted-sample preparation may have opened video handles in the
-        # parent. Close before workers fork; every worker opens its own handles.
-        for dataset in (self.train_ds, self.val_ds):
-            if dataset.video_reader is not None:
-                dataset.video_reader.close()
         self.train_dl = DataLoader(
             self.train_ds,
             batch_size=args.batch_size,
@@ -201,10 +196,6 @@ class Trainer:
             augment=augment,
             resize_mode=self.args.resize_mode,
             paper_protocol=getattr(self.args, "paper_protocol", False),
-            storage=getattr(self.args, "storage", "images"),
-            video_backend=getattr(self.args, "video_backend", "opencv"),
-            video_threads=getattr(self.args, "video_threads", 1),
-            video_cache_size=getattr(self.args, "video_cache_size", 4),
         )
 
     def _predict_saliency(self, rgb, mask):
