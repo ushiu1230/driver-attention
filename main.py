@@ -11,20 +11,22 @@ from train import Trainer
 
 
 def parse_args(argv=None):
+    config_parser = argparse.ArgumentParser(add_help=False)
+    config_parser.add_argument("--hparams", default=str(Path(__file__).parent / "configs" / "hparams.json"))
+    config_args, _ = config_parser.parse_known_args(argv)
     parser = argparse.ArgumentParser(
-        description="Train DriverGazeNet on the DriverGaze360 saliency dataset."
+        description="Train DriverGazeNet on the DriverGaze360 saliency dataset.",
+        parents=[config_parser],
     )
     parser.add_argument("--experiment", choices=EXPERIMENTS, default="baseline")
     parser.add_argument("--name", default=None, help="Name used for this run's outputs")
     parser.add_argument("--save-dir", default="./checkpoints")
     parser.add_argument(
         "--train-path",
-        required=True,
         help="Root of the training recordings (e.g. downloaded dataset/train)",
     )
     parser.add_argument(
         "--val-path",
-        required=True,
         help="Root of the validation recordings (e.g. downloaded dataset/val)",
     )
     parser.add_argument("--num-epochs", type=int, default=20)
@@ -53,10 +55,12 @@ def parse_args(argv=None):
     parser.add_argument("--frame-stride", type=int, default=1)
     parser.add_argument("--skip-first", type=int, default=30)
     parser.add_argument(
-        "--paper-protocol", action="store_true",
+        "--paper-protocol", action=argparse.BooleanOptionalAction,
         help="Use source end-exclusive clip sampling and clip-plus-future fixation filtering",
     )
     parser.add_argument("--img-size", type=int, nargs=2, default=(224, 1120))
+    parser.add_argument("--gaze-source-size", type=int, nargs=2, default=None,
+                        help="CSV gaze coordinate canvas (H W); paper default is 720 6400")
     parser.add_argument(
         "--resize-mode",
         choices=("stretch", "pad"),
@@ -88,7 +92,7 @@ def parse_args(argv=None):
         "--backbone-lr-scale", type=float, default=1.0,
         help="Backbone LR multiplier; 0.1 gives discriminative LR relative to the head",
     )
-    parser.add_argument("--use-amp", action="store_true")
+    parser.add_argument("--use-amp", action=argparse.BooleanOptionalAction)
     parser.add_argument(
         "--weighted-samples",
         action="store_true",
@@ -106,7 +110,37 @@ def parse_args(argv=None):
     parser.add_argument("--no-progress", dest="progress", action="store_false")
     parser.add_argument("--log-interval", type=int, default=100)
     parser.add_argument("--seed", type=int, default=123)
-    return parser.parse_args(argv)
+    try:
+        config = json.loads(Path(config_args.hparams).read_text(encoding="utf-8"))
+        if not isinstance(config, dict):
+            raise ValueError("hparams must be a JSON object")
+        actions = {a.dest: a for a in parser._actions if a.dest not in ("help", "hparams")}
+        for key, value in config.items():
+            if key not in actions:
+                raise ValueError(f"Unknown hparams key: {key}")
+            action = actions[key]
+            if action.nargs == 0:
+                if not isinstance(value, bool):
+                    raise ValueError(f"{key} must be boolean")
+                continue
+            values = value if isinstance(value, list) else [value]
+            if isinstance(action.nargs, int) and len(values) != action.nargs:
+                raise ValueError(f"{key} requires {action.nargs} values")
+            if action.nargs is None and isinstance(value, list):
+                raise ValueError(f"{key} requires one value")
+            for item in values:
+                expected = action.type or str
+                if isinstance(item, bool) or not isinstance(item, expected if expected != float else (int, float)):
+                    raise ValueError(f"Invalid type for {key}")
+                if action.choices is not None and item not in action.choices:
+                    raise ValueError(f"Invalid choice for {key}: {item}")
+        parser.set_defaults(**config)
+    except (OSError, ValueError) as error:
+        parser.error(f"Cannot load hparams: {error}")
+    args = parser.parse_args(argv)
+    if not args.train_path or not args.val_path:
+        parser.error("train-path and val-path must be set in hparams or CLI")
+    return args
 
 
 def main(argv=None):

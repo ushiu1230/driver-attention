@@ -290,3 +290,61 @@ python infer.py `
   --image "C:\path\to\recording\rgb\000040.jpg" `
   --out-dir .\results\test_inference
 ```
+# Shared saliency configuration
+
+Prepare RGB/saliency JPEG frames at H=224/W=1120:
+
+```bash
+bash scripts/prepare_dataset.sh ./data/raw/drivergaze360/trainval/dataset 2
+```
+
+CSV and source videos stay unchanged; gaze uses the original 6400x720 canvas
+configured in hparams. ImageNet normalization remains in the loader. Existing
+full-size outputs are regenerated from source videos; matching exports are
+skipped using a preparation marker and frame count. DT/IS are not extracted.
+FFmpeg bilinear resize plus JPEG encoding differs numerically from full-size
+JPEG then torchvision resize; use the same prepared data for all experiments.
+Actual disk savings and throughput require measurement on real recordings.
+
+Each prepared recording includes `preprocessing.json`, which records stored
+image dimensions separately from the unchanged CSV gaze canvas. The loader
+uses this canvas to scale gaze exactly once and rejects conflicting explicit
+settings, mismatched image dimensions, and missing metadata for marked exports.
+Rerun prepare to add metadata to existing exports (matching JPEGs are reused).
+For a CSV genuinely using a different canvas, set `GAZE_SOURCE_HEIGHT` and
+`GAZE_SOURCE_WIDTH` when preparing and use matching `--gaze-source-size H W`.
+These are declared coordinate conventions, not inferred from the range of gaze
+values: the true CSV canvas still needs confirmation from the data source.
+
+`main.py` loads `configs/hparams.json` by default (resolved relative to the
+repository). Use `--hparams path.json` for another configuration; explicit CLI
+arguments override the file. Dataset paths in JSON are relative to the working
+directory. Unknown keys and invalid types/choices fail before training.
+
+```bash
+python main.py --name E2 --experiment baseline
+python main.py --name E3 --experiment tsm_attn_pool
+python main.py --name E4 --experiment tsm_attn_pool --weighted-samples
+```
+
+E1 uses the training dataset's `get_avg_saliency()` without model training.
+For T4 memory constraints, override `--batch-size 1 --accumulation-steps 4`;
+gradient accumulation does not reproduce batch-4 BatchNorm statistics.
+
+The saliency preset follows the [author's dataset implementation](https://github.com/dfki-av/drivergaze360/blob/main/dataset/dataset.py):
+stretch resize to H=224/W=1120, RGB float scaling and ImageNet normalization,
+saliency float scaling without ImageNet normalization, last-frame saliency,
+skip first 30 frames, end-exclusive sampling, and current-plus-future gaze.
+CSV coordinates use H=720/W=6400 independently of decoded JPEG dimensions;
+override `--gaze-source-size H W` only if the CSV uses another coordinate canvas.
+Paper fixation mapping rounds before rejecting out-of-bounds points.
+
+For the project's E2 offset=15 ablation, sampling and fixation windows use the
+same reference 16-frame span as E3/E4: the RGB and target are the final frame,
+not a prediction 15 frames into the future. This alignment is a project adaptation.
+`--no-paper-protocol` disables source sampling/fixation-window behavior.
+JPEG decoding remains on CPU for multi-worker loading; no DT/IS tasks are loaded.
+Mean prior remains sum-normalized; the source max-normalizes its display prior,
+then sum-normalizes again for KLD weighting. E4 retains project weight clipping.
+MobileNet, AMP, early-stopping patience and clip step are project choices;
+this preset is not a full reproduction of the multitask paper.

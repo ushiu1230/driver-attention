@@ -196,6 +196,7 @@ class Trainer:
             augment=augment,
             resize_mode=self.args.resize_mode,
             paper_protocol=getattr(self.args, "paper_protocol", False),
+            gaze_source_size=getattr(self.args, "gaze_source_size", None),
         )
 
     def _predict_saliency(self, rgb, mask):
@@ -439,6 +440,7 @@ class Trainer:
             "frame_stride",
             "accumulation_steps",
             "paper_protocol",
+            "gaze_source_size",
             "loss_profile",
             "weighted_samples",
             "img_size",

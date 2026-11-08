@@ -37,6 +37,8 @@ def resize_with_pad(image, size):
 
 def resize_image(image, size, mode="stretch"):
     """Resize to (height, width), either directly or with aspect-preserving padding."""
+    if tuple(image.shape[-2:]) == tuple(size) and mode in ("stretch", "pad"):
+        return image
     if mode == "stretch":
         return v2.functional.resize(image, size=list(size), antialias=True)
     if mode == "pad":
@@ -44,7 +46,7 @@ def resize_image(image, size, mode="stretch"):
     raise ValueError(f"Unsupported resize mode: {mode}")
 
 
-def make_fixation_mask(gaze, src_img_size, target_size, resize_mode="stretch"):
+def make_fixation_mask(gaze, src_img_size, target_size, resize_mode="stretch", paper_protocol=False):
     """Map gaze coordinates into the resized image coordinate system."""
     if not {"gaze_x", "gaze_y"}.issubset(gaze.columns):
         raise ValueError("Gaze metadata must contain gaze_x and gaze_y columns")
@@ -71,6 +73,14 @@ def make_fixation_mask(gaze, src_img_size, target_size, resize_mode="stretch"):
 
     x = pd.to_numeric(gaze["gaze_x"], errors="coerce").to_numpy(dtype=np.float64)
     y = pd.to_numeric(gaze["gaze_y"], errors="coerce").to_numpy(dtype=np.float64)
+    if paper_protocol:
+        # Source implementation rounds first, then rejects out-of-canvas points.
+        x = np.rint(x * resized_width / source_width) + pad_left
+        y = np.rint(y * resized_height / source_height) + pad_top
+        valid = np.isfinite(x) & np.isfinite(y) & (x >= 0) & (x < target_width) & (y >= 0) & (y < target_height)
+        mask = torch.zeros((1, target_height, target_width), dtype=torch.float32)
+        mask[0, y[valid].astype(np.int64), x[valid].astype(np.int64)] = 1
+        return mask
     in_bounds = (
         np.isfinite(x)
         & np.isfinite(y)
@@ -138,6 +148,7 @@ class DG360LiteDataset(Dataset):
         augment=False,
         resize_mode="stretch",
         paper_protocol=False,
+        gaze_source_size=None,
     ):
         self.root = Path(root)
         self.T = int(T)
@@ -149,9 +160,13 @@ class DG360LiteDataset(Dataset):
         self.augment = bool(augment)
         self.resize_mode = resize_mode
         self.paper_protocol = bool(paper_protocol)
-
+        self.gaze_source_size = tuple(gaze_source_size) if gaze_source_size is not None else None
+        if self.gaze_source_size is not None and (len(self.gaze_source_size) != 2 or min(self.gaze_source_size) < 1):
+            raise ValueError("gaze_source_size must contain positive (H, W)")
         if self.T < 1 or self.stride < 1 or self.clip_step < 1:
             raise ValueError("T, frame_stride, and clip_step must be positive integers")
+        if self.paper_protocol and self.target_offset % self.stride:
+            raise ValueError("paper_protocol requires target_offset divisible by frame_stride")
         if self.target_offset < 0:
             raise ValueError("target_offset must be non-negative")
         if len(self.img_size) != 2 or any(size < 1 for size in self.img_size):
@@ -167,6 +182,8 @@ class DG360LiteDataset(Dataset):
                 f"No recordings found under {self.root}. Expected folders containing "
                 "rgb/, saliency/, and sim_gaze_df.csv."
             )
+
+        self.preprocessing = [self._load_preprocessing(rec) for rec in self.data_paths]
 
         self.frame_ids = self._check_files()
         if self.paper_protocol:
@@ -305,7 +322,7 @@ class DG360LiteDataset(Dataset):
         for recording_idx, n_frames in enumerate(self.data_len):
             if self.paper_protocol:
                 # Match the local paper source: range(30, N - T*stride, step).
-                upper = n_frames - self.T * self.stride
+                upper = n_frames - self.T * self.stride - self.target_offset
                 for start in range(self.skip_first, upper, self.clip_step):
                     samples.append((recording_idx, start))
                 continue
@@ -339,7 +356,8 @@ class DG360LiteDataset(Dataset):
                 }
             )
         signature = {
-            "version": 1,
+            "version": 2,
+            "paper_protocol": self.paper_protocol,
             "records": records,
             "T": self.T,
             "stride": self.stride,
@@ -456,6 +474,43 @@ class DG360LiteDataset(Dataset):
     def __len__(self):
         return len(self.samples)
 
+    def _load_preprocessing(self, recording):
+        path = recording / "preprocessing.json"
+        if not path.exists():
+            if (recording / "rgb" / ".prepared").exists():
+                raise ValueError(f"Missing geometry metadata in {recording}; rerun prepare_dataset.sh")
+            return None  # Legacy, full-resolution data remains supported.
+        try:
+            info = json.loads(path.read_text(encoding="utf-8"))
+            for key in ("image_size", "gaze_source_size"):
+                size = info[key]
+                if not isinstance(size, list) or len(size) != 2 or any(type(v) is not int or v < 1 for v in size):
+                    raise ValueError(f"Invalid {key}")
+            if info["version"] != 1 or info["resize_mode"] != "stretch" or info["csv_coordinates"] != "unchanged":
+                raise ValueError("Unsupported preprocessing geometry")
+            if self.resize_mode != "stretch":
+                raise ValueError("Pre-resized stretch data requires resize_mode=stretch")
+            if self.gaze_source_size is not None and self.gaze_source_size != tuple(info["gaze_source_size"]):
+                raise ValueError("gaze_source_size conflicts with the recorded CSV canvas")
+            return info
+        except (OSError, KeyError, TypeError, ValueError) as error:
+            raise ValueError(f"Invalid geometry metadata {path}: {error}") from error
+
+    def _gaze_canvas(self, recording_idx, decoded_size):
+        info = self.preprocessing[recording_idx]
+        if info is not None:
+            if tuple(decoded_size) != tuple(info["image_size"]):
+                raise ValueError(f"JPEG dimensions disagree with preprocessing.json in {self.data_paths[recording_idx]}")
+            return tuple(info["gaze_source_size"])
+        if self.gaze_source_size is not None:
+            return self.gaze_source_size
+        if self.paper_protocol:
+            return (720, 6400)
+        # A resized image alone cannot identify the original CSV coordinate canvas.
+        if tuple(decoded_size) == self.img_size:
+            raise ValueError("Ambiguous gaze coordinates: set gaze_source_size or rerun prepare_dataset.sh to record geometry")
+        return decoded_size
+
     def _read(self, recording_idx, frame_id, kind):
         image_dir = self.data_paths[recording_idx] / kind
         image_path = image_dir / f"{frame_id:06d}.jpg"
@@ -473,6 +528,9 @@ class DG360LiteDataset(Dataset):
             ) from error
         if not isinstance(image, torch.Tensor):
             raise TypeError(f"Expected one decoded image tensor from {image_path}")
+        info = self.preprocessing[recording_idx]
+        if info is not None and tuple(image.shape[-2:]) != tuple(info["image_size"]):
+            raise ValueError(f"JPEG dimensions disagree with preprocessing.json: {image_path}")
         return image
 
     def __getitem__(self, index):
@@ -506,6 +564,7 @@ class DG360LiteDataset(Dataset):
                 f"RGB={tuple(target_rgb_size)}, "
                 f"saliency={tuple(saliency.shape[-2:])}"
             )
+        gaze_canvas = self._gaze_canvas(recording_idx, target_rgb_size)
         # mask vùng ảnh thật, tạo từ kích thước gốc
         valid = resize_image(
             torch.ones_like(saliency), self.img_size, self.resize_mode
@@ -519,8 +578,8 @@ class DG360LiteDataset(Dataset):
         metadata = load_csv(str(csv_path))
         if self.paper_protocol:
             fixation_ids = set(paper_fixation_frame_ids(
-                self.frame_ids[recording_idx], start, self.T, self.stride,
-                self.target_offset,
+                self.frame_ids[recording_idx], start,
+                self.T + self.target_offset // self.stride, self.stride,
             ))
             fixation_gaze = metadata.loc[metadata["Frame"].isin(fixation_ids)]
         else:
@@ -531,9 +590,10 @@ class DG360LiteDataset(Dataset):
         else:
             fixation = make_fixation_mask(
                 fixation_gaze,
-                src_img_size=target_rgb_size,
+                src_img_size=gaze_canvas,
                 target_size=self.img_size,
                 resize_mode=self.resize_mode,
+                paper_protocol=self.paper_protocol,
             )
 
         if self.augment:
