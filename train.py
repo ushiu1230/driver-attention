@@ -23,6 +23,10 @@ class Trainer:
             raise ValueError("accumulation steps must be positive")
         if args.early_stopping_patience < 1:
             raise ValueError("early-stopping patience must be positive")
+        args.lr_drop_epoch = getattr(args, "lr_drop_epoch", 0)
+        args.lr_drop_factor = getattr(args, "lr_drop_factor", 0.1)
+        if args.lr_drop_epoch < 0 or not 0 < args.lr_drop_factor < 1:
+            raise ValueError("lr-drop-epoch must be non-negative and lr-drop-factor between 0 and 1")
         if args.num_workers < 0:
             raise ValueError("num-workers must be non-negative")
         if (
@@ -60,22 +64,26 @@ class Trainer:
             )
             if not torch.isfinite(raw_weights).all() or (raw_weights < 0).any():
                 raise ValueError("Computed KLD sample weights are invalid")
-            lower = torch.quantile(raw_weights, 0.20)
-            upper = torch.quantile(raw_weights, 0.80)
-            clipped_weights = raw_weights.clamp(min=lower, max=upper)
-            mean_weight = clipped_weights.mean()
-            if mean_weight <= torch.finfo(clipped_weights.dtype).eps:
+            valid_samples = self.train_ds.valid_saliency_samples
+            valid_weights = raw_weights[valid_samples]
+            lower = torch.quantile(valid_weights, 0.20)
+            upper = torch.quantile(valid_weights, 0.80)
+            clipped_valid_weights = valid_weights.clamp(min=lower, max=upper)
+            mean_weight = clipped_valid_weights.mean()
+            if mean_weight <= torch.finfo(clipped_valid_weights.dtype).eps:
                 print(
                     "KLD sample weights have no usable variation; "
                     "falling back to uniform training weights."
                 )
-                clipped_weights.fill_(1.0)
+                clipped_valid_weights.fill_(1.0)
             else:
-                clipped_weights /= mean_weight
+                clipped_valid_weights /= mean_weight
+            clipped_weights = torch.zeros_like(raw_weights)
+            clipped_weights[valid_samples] = clipped_valid_weights
             self.train_sample_weights = clipped_weights.to(self.device)
             print(
                 "KLD sample weighting enabled: "
-                f"{len(clipped_weights)} weights, clipped to "
+                f"{int(valid_samples.sum())}/{len(clipped_weights)} valid targets, clipped to "
                 f"[{lower.item():.6g}, {upper.item():.6g}] and mean-normalized."
             )
 
@@ -125,6 +133,12 @@ class Trainer:
             ]
         self.optimizer = torch.optim.AdamW(
             parameter_groups, betas=(0.9, 0.999), weight_decay=args.weight_decay
+        )
+        self.scheduler = (
+            torch.optim.lr_scheduler.MultiStepLR(
+                self.optimizer, milestones=[args.lr_drop_epoch], gamma=args.lr_drop_factor
+            )
+            if args.lr_drop_epoch else None
         )
         if args.init_weights:
             self.initialize_weights(args.init_weights)
@@ -216,6 +230,8 @@ class Trainer:
         mask = batch["mask"].to(self.device, non_blocking=True) > 0
         fixation = batch["fixation"].to(self.device, non_blocking=True) > 0
         sample_idx = batch["sample_idx"].to(self.device, non_blocking=True)
+        if not torch.isfinite(target).all() or (target < 0).any():
+            raise ValueError("Saliency targets must be finite and non-negative")
         target = target.masked_fill(~mask, 0)
         target_mass = target.flatten(1).sum(dim=1, keepdim=True)
         valid_target = target_mass.squeeze(1) > 0
@@ -385,6 +401,7 @@ class Trainer:
         checkpoint = {
             "model": self.model.state_dict(),
             "optimizer": self.optimizer.state_dict(),
+            "scheduler": self.scheduler.state_dict() if self.scheduler is not None else None,
             "scaler": self.scaler.state_dict(),
             "epoch": epoch,
             "best_val_loss": self.best_val_loss,
@@ -446,6 +463,8 @@ class Trainer:
             "img_size",
             "resize_mode",
             "lr",
+            "lr_drop_epoch",
+            "lr_drop_factor",
             "weight_decay",
             "dropout",
             "augment",
@@ -464,6 +483,8 @@ class Trainer:
             "loss_profile": "project",
             "freeze_backbone_stages": 0,
             "backbone_lr_scale": 1.0,
+            "lr_drop_epoch": 0,
+            "lr_drop_factor": 0.1,
         }
         changed_settings = [
             f"{name}: checkpoint="
@@ -548,12 +569,27 @@ class Trainer:
             if "lr" in group
         ]
         expected_lrs = [float(group["lr"]) for group in self.optimizer.param_groups]
+        scheduler_state = checkpoint.get("scheduler")
+        if self.scheduler is not None:
+            if not isinstance(scheduler_state, dict):
+                raise ValueError("Scheduled training requires scheduler state in the resume checkpoint")
+            completed_epochs = int(checkpoint["epoch"]) + 1
+            if scheduler_state.get("last_epoch") != completed_epochs:
+                raise ValueError("Scheduler epoch does not match the resume checkpoint")
+            if completed_epochs >= self.args.lr_drop_epoch:
+                expected_lrs = [lr * self.args.lr_drop_factor for lr in expected_lrs]
+            if scheduler_state.get("_last_lr") != checkpoint_lrs:
+                raise ValueError("Scheduler learning rates do not match optimizer state")
+        elif scheduler_state is not None:
+            raise ValueError("Resume checkpoint uses LR scheduling; enable its original schedule")
         if checkpoint_lrs != expected_lrs:
             raise ValueError(
                 "Cannot resume a checkpoint whose optimizer learning rate is "
-                "not the configured fixed learning rate. Start a new run."
+                "inconsistent with the configured learning-rate schedule. Start a new run."
             )
         self.optimizer.load_state_dict(optimizer_state)
+        if self.scheduler is not None:
+            self.scheduler.load_state_dict(scheduler_state)
         if "scaler" in checkpoint:
             self.scaler.load_state_dict(checkpoint["scaler"])
         self.epochs_run = int(checkpoint["epoch"]) + 1
@@ -587,6 +623,15 @@ class Trainer:
                 self.logger.log_epoch(
                     train_loss, val_loss, val_metrics, epoch + 1
                 )
+                self.logger.log({"lr": current_lr}, "epoch", epoch + 1)
+                if self.scheduler is not None:
+                    previous_lrs = self.scheduler.get_last_lr()
+                    self.scheduler.step()
+                    if self.scheduler.get_last_lr() != previous_lrs:
+                        print(
+                            f"LR reduced for epoch {epoch + 2}: "
+                            f"{self.scheduler.get_last_lr()}", flush=True,
+                        )
                 self.save_checkpoint(
                     epoch, val_loss, val_metrics, "last.pt"
                 )

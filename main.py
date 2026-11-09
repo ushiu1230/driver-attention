@@ -33,6 +33,14 @@ def parse_args(argv=None):
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--accumulation-steps", type=int, default=1)
     parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument(
+        "--lr-drop-epoch", type=int, default=0,
+        help="Reduce LR once after this many completed epochs; 0 disables scheduling",
+    )
+    parser.add_argument(
+        "--lr-drop-factor", type=float, default=0.1,
+        help="LR multiplier at lr-drop-epoch (strictly between 0 and 1)",
+    )
     parser.add_argument("--weight-decay", type=float, default=1e-2)
     parser.add_argument("--early-stopping-patience", type=int, default=7)
     parser.add_argument("--w-sal", type=float, default=1.0)
@@ -159,6 +167,8 @@ def main(argv=None):
         raise ValueError("freeze stages must be non-negative and backbone LR scale positive")
     if args.early_stopping_patience < 1:
         raise ValueError("--early-stopping-patience must be positive")
+    if args.lr_drop_epoch < 0 or not 0 < args.lr_drop_factor < 1:
+        raise ValueError("lr-drop-epoch must be non-negative and lr-drop-factor between 0 and 1")
     if args.resume and args.init_weights:
         raise ValueError("--resume and --init-weights cannot be used together")
     if args.clip_step < 1 or args.frame_stride < 1:

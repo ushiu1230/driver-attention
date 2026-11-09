@@ -356,7 +356,7 @@ class DG360LiteDataset(Dataset):
                 }
             )
         signature = {
-            "version": 2,
+            "version": 3,
             "paper_protocol": self.paper_protocol,
             "records": records,
             "T": self.T,
@@ -411,12 +411,14 @@ class DG360LiteDataset(Dataset):
             resize_image(saliency, self.img_size, self.resize_mode)
         ).masked_fill(~valid, 0)
         total = saliency.sum()
-        if not torch.isfinite(total) or total <= 0:
+        if not torch.isfinite(saliency).all() or (saliency < 0).any():
             rec_dir = self.data_paths[recording_idx]
             raise ValueError(
-                "Cannot calculate sample weights from an empty or invalid "
+                "Cannot calculate sample weights from an invalid "
                 f"saliency target: {rec_dir}, frame {target_id:06d}"
             )
+        if total <= 0:
+            return None
         return saliency / total
 
     def get_avg_saliency(self, cache_dir=None, force_recompute=False):
@@ -430,15 +432,26 @@ class DG360LiteDataset(Dataset):
             cached = self._load_tensor_cache(
                 average_path, expected_shape=(1, *self.img_size)
             )
-            if cached is not None and cached.sum() > 0:
+            if cached is not None and (cached >= 0).all() and cached.sum() > 0:
                 return cached / cached.sum()
 
         running_sum = torch.zeros((1, *self.img_size), dtype=torch.float32)
+        valid_samples = 0
         for sample_idx in range(len(self.samples)):
-            running_sum += self._target_saliency_distribution(sample_idx)
-        average = running_sum / len(self.samples)
+            target = self._target_saliency_distribution(sample_idx)
+            if target is None:
+                continue
+            running_sum += target
+            valid_samples += 1
+        if valid_samples == 0:
+            raise RuntimeError("No non-empty saliency targets available for the training prior")
+        average = running_sum / valid_samples
         average = average / average.sum().clamp_min(torch.finfo(average.dtype).tiny)
         self._save_tensor_cache(average, average_path)
+        print(
+            f"Saliency prior: retained {valid_samples}/{len(self.samples)} targets; "
+            f"empty saliency={len(self.samples) - valid_samples}", flush=True,
+        )
         return average
 
     def get_sample_weights(
@@ -446,29 +459,48 @@ class DG360LiteDataset(Dataset):
     ):
         """Return per-sample KL(target || average_saliency) weights on CPU.
 
-        Weights follow ``self.samples`` order and are raw KLD values. The
-        trainer is responsible for percentile clipping and mean normalization.
+        Weights follow ``self.samples`` order and are raw KLD values. Empty
+        targets have zero weight and False in ``valid_saliency_samples``.
+        The trainer clips and normalizes weights over valid samples only.
         """
         _, weights_path = self._weight_cache_paths(cache_dir)
+        validity_path = weights_path.with_name("validity_" + weights_path.name)
         if not force_recompute:
             cached = self._load_tensor_cache(
                 weights_path, expected_shape=(len(self.samples),)
             )
-            if cached is not None and (cached >= 0).all():
+            validity = self._load_tensor_cache(
+                validity_path, expected_shape=(len(self.samples),)
+            )
+            if (
+                cached is not None and (cached >= 0).all()
+                and validity is not None and ((validity == 0) | (validity == 1)).all()
+                and validity.any() and (cached[~validity.bool()] == 0).all()
+            ):
+                self.valid_saliency_samples = validity.bool()
                 return cached
 
         average = self.get_avg_saliency(
             cache_dir=cache_dir, force_recompute=force_recompute
         ).flatten()
         log_average = average.clamp_min(eps).log()
-        weights = torch.empty(len(self.samples), dtype=torch.float32)
+        weights = torch.zeros(len(self.samples), dtype=torch.float32)
+        validity = torch.zeros(len(self.samples), dtype=torch.bool)
         for sample_idx in range(len(self.samples)):
-            target = self._target_saliency_distribution(sample_idx).flatten()
+            target = self._target_saliency_distribution(sample_idx)
+            if target is None:
+                continue
+            validity[sample_idx] = True
+            target = target.flatten()
             weights[sample_idx] = (
                 target * (target.clamp_min(eps).log() - log_average)
             ).sum().clamp_min(0)
 
+        if not validity.any():
+            raise RuntimeError("No non-empty saliency targets available for sample weighting")
         self._save_tensor_cache(weights, weights_path)
+        self._save_tensor_cache(validity, validity_path)
+        self.valid_saliency_samples = validity
         return weights
 
     def __len__(self):
